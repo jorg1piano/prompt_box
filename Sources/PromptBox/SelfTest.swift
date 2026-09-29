@@ -2,8 +2,9 @@ import AppKit
 import PromptBoxCore
 
 /// `PROMPTBOX_SELFTEST=/some/dir PromptBox.app/Contents/MacOS/PromptBox` types, pastes three
-/// images, deletes a word, a line and an image, writes what it would send to that folder, then
-/// shows the window for three seconds and quits. It never saves the draft, history or deleted log.
+/// images, deletes a word, a line and an image, writes what it would send to that folder, opens
+/// two more tabs and searches them with ⌘K (or opens the deleted list, with
+/// PROMPTBOX_SELFTEST_SIDEBAR set), then shows the window for three seconds and quits. It never saves the draft, history or deleted log.
 @MainActor
 enum SelfTest {
     private static var window: PromptWindow?
@@ -41,7 +42,15 @@ enum SelfTest {
         text.deleteLines(nil)
         window.strip.onRemove?(1)
 
-        window.toggleSidebar(.deleted)
+        // Two more tabs, then a ⌘K search with a typo in it.
+        window.newTab(with: Prompt(text: "Refactor the authentication flow\nMove token refresh into the client"))
+        window.newTab(with: Prompt(text: "Database migration for users\nAdd an index on email"))
+        window.selectTab(offset: 1)
+        if ProcessInfo.processInfo.environment["PROMPTBOX_SELFTEST_SIDEBAR"] != nil {
+            window.toggleSidebar(.deleted)
+        } else {
+            window.switcher.open(query: "authentcation")
+        }
         let sent = (try? PromptExport.plainText(from: window.prompt, imageDirectory: dir)) ?? "export failed"
         let deleted = window.deleted.entries.map { $0.preview }.joined(separator: "\n---\n")
         let report = "SENT:\n\(sent)\n\nDELETED (newest first):\n\(deleted)\n\nIMAGES: \(window.strip.images.count)\n"

@@ -18,7 +18,7 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     var mode: PromptWindow.SidebarMode = .deleted {
         didSet {
             picker.selectedSegment = mode.rawValue
-            hint.stringValue = mode == .deleted ? "↩ insert at cursor   ⌫ forget   esc back" : "↩ restore   ⌫ forget   esc back"
+            hint.stringValue = mode == .deleted ? "↩ insert at cursor   ⌫ forget   esc back" : "↩ open in a tab   ⌫ forget   esc back"
             reload()
             if !entries.isEmpty { table.selectRowIndexes([0], byExtendingSelection: false) }
         }

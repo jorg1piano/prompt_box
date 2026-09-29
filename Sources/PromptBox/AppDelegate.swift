@@ -15,6 +15,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = buildMenu()
         window = PromptWindow()
         window.onHide = { [weak self] event in self?.notifyHammerspoon(event) }
+        installTabKeys()
+    }
+
+    /// ⌃Tab and ⌃⇧Tab switch tabs. They're caught before the text view sees them, since a text
+    /// view treats Tab as typing and never offers it to the menu.
+    private func installTabKeys() {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.window.panel, event.keyCode == 48,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.shift) == .control else {
+                return event
+            }
+            self.window.selectTab(offset: event.modifierFlags.contains(.shift) ? -1 : 1)
+            return nil
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -108,10 +122,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let copy = prompt.addItem(withTitle: "Copy and Hide", action: #selector(copyPrompt), keyEquivalent: "\r")
         copy.keyEquivalentModifierMask = [.command, .shift]
         copy.target = self
-        prompt.addItem(withTitle: "New Prompt", action: #selector(newPrompt), keyEquivalent: "n").target = self
         prompt.addItem(.separator())
         prompt.addItem(withTitle: "Deleted Text", action: #selector(showDeleted), keyEquivalent: "d").target = self
         prompt.addItem(withTitle: "History", action: #selector(showHistory), keyEquivalent: "y").target = self
+
+        let tabs = submenu(in: main, title: "Tab")
+        tabs.addItem(withTitle: "New Tab", action: #selector(newTab), keyEquivalent: "t").target = self
+        tabs.addItem(withTitle: "New Tab", action: #selector(newTab), keyEquivalent: "n").target = self
+        tabs.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "w").target = self
+        tabs.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenTab), keyEquivalent: "T").target = self
+        tabs.addItem(.separator())
+        tabs.addItem(withTitle: "Find Tab…", action: #selector(findTab), keyEquivalent: "k").target = self
+        let next = tabs.addItem(withTitle: "Next Tab", action: #selector(nextTab), keyEquivalent: "]")
+        next.keyEquivalentModifierMask = [.command, .shift]
+        next.target = self
+        let previous = tabs.addItem(withTitle: "Previous Tab", action: #selector(previousTab), keyEquivalent: "[")
+        previous.keyEquivalentModifierMask = [.command, .shift]
+        previous.target = self
+        for number in 1...9 {
+            let item = tabs.addItem(withTitle: number == 9 ? "Last Tab" : "Tab \(number)", action: #selector(selectNumberedTab(_:)),
+                                    keyEquivalent: "\(number)")
+            item.tag = number
+            item.target = self
+        }
 
         let view = submenu(in: main, title: "View")
         view.addItem(withTitle: "Bigger", action: #selector(biggerFont), keyEquivalent: "=").target = self
@@ -130,7 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func hideWindow() { window.hide() }
     @objc private func sendPrompt() { window.send(paste: true) }
     @objc private func copyPrompt() { window.send(paste: false) }
-    @objc private func newPrompt() { window.newPrompt() }
+    @objc private func newTab() { window.newTab() }
+    @objc private func closeTab() { window.closeCurrentTab() }
+    @objc private func reopenTab() { window.reopenClosedTab() }
+    @objc private func findTab() { window.toggleSwitcher() }
+    @objc private func nextTab() { window.selectTab(offset: 1) }
+    @objc private func previousTab() { window.selectTab(offset: -1) }
+    @objc private func selectNumberedTab(_ sender: NSMenuItem) { window.selectTab(number: sender.tag) }
     @objc private func showDeleted() { window.toggleSidebar(.deleted) }
     @objc private func showHistory() { window.toggleSidebar(.history) }
     @objc private func biggerFont() { window.changeFontSize(by: 1) }
