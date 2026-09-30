@@ -133,9 +133,14 @@ remembers the focused window on hyper+p, gives it focus back on `promptbox-close
 ## Build
 
 ```sh
-./scripts/build-app.sh      # builds, signs and registers build/PromptBox.app
-swift test                  # core logic: deletion joining, fuzzy search, export, storage
+just                        # lists the recipes
+just install                # builds and installs /Applications/PromptBox.app, restarting it
+just build                  # builds, signs and registers build/PromptBox.app
+just test                   # core logic: deletion joining, fuzzy search, export, storage, transcripts
 ```
+
+`just install` quits a running PromptBox through AppleScript so it saves its tabs, and points
+`promptbox://` at the installed copy.
 
 Requires macOS 26.
 
