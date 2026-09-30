@@ -12,6 +12,8 @@ public enum Paths {
     public static var tabs: URL { support.appendingPathComponent("tabs", isDirectory: true) }
     public static var history: URL { support.appendingPathComponent("history", isDirectory: true) }
     public static var deleted: URL { support.appendingPathComponent("deleted", isDirectory: true) }
+    /// Daily transcript files and the prompts found in them.
+    public static var transcripts: URL { support.appendingPathComponent("transcripts", isDirectory: true) }
 
     /// Images pasted into a terminal as paths. Lives in Caches because "Application Support" has a
     /// space in it, and a path with a space breaks when a terminal agent parses it.

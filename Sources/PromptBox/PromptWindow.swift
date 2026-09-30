@@ -2,7 +2,8 @@ import AppKit
 import PromptBoxCore
 
 /// The floating editor window: tabs on top, the editor with its sidebar of deleted text and sent
-/// prompts, the image strip, and a status line.
+/// prompts, the image strip, and a status line. The pinned transcript tab swaps the editor for
+/// the transcript panel.
 @MainActor
 final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     enum SidebarMode: Int { case deleted, history }
@@ -15,6 +16,9 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private let scrollView = NSScrollView()
     private let sidebar: Sidebar
     private let status = NSTextField(labelWithString: "")
+    let transcript: TranscriptPanel
+    /// Nil for the self-test, which never opens the microphone.
+    let listener: Listener?
 
     let history: EntryStore
     let deleted: EntryStore
@@ -23,7 +27,9 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private let persist: Bool
 
     private(set) var tabs: [Tab] = []
+    /// The prompt tab in the editor, or the one to go back to while the transcript shows.
     private(set) var current: Tab!
+    private(set) var showingTranscript = false
     /// Prompts from tabs closed this session, for ⌘⇧T.
     private var closedTabs: [Prompt] = []
 
@@ -37,6 +43,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     var onHide: ((String) -> Void)?
 
     private static let fontSizeKey = "fontSize"
+    private static let transcriptKey = "showingTranscript"
     private static let widthKey = "widthFraction"
     private static let heightKey = "heightFraction"
     /// The window never opens smaller than a third of the screen's width and half its height.
@@ -71,6 +78,11 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
                         styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                         backing: .buffered, defer: false)
         sidebar = Sidebar(history: history, deleted: deleted)
+        let transcripts = root.appendingPathComponent("transcripts")
+        let log = TranscriptLog(directory: transcripts)
+        listener = persist ? Listener(log: log) : nil
+        transcript = TranscriptPanel(log: log, store: CandidateStore(url: transcripts.appendingPathComponent("prompts.json")),
+                                     listener: listener)
         super.init()
 
         panel.title = "PromptBox"
@@ -98,6 +110,13 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
             self.close(self.tabs[i])
         }
         tabBar.onNew = { [weak self] in self?.newTab() }
+        tabBar.onSelectTranscript = { [weak self] in self?.showTranscript() }
+        transcript.onOpen = { [weak self] text in self?.newTab(with: Prompt(text: text)) }
+        transcript.onCancel = { [weak self] in self?.hide() }
+        transcript.onListenerChange = { [weak self] in
+            guard let self else { return }
+            if case .listening = self.listener?.state { self.tabBar.listening = true } else { self.tabBar.listening = false }
+        }
         switcher.candidates = { [weak self] in self?.switcherCandidates() ?? [] }
         switcher.onChoose = { [weak self] id in
             guard let self, let tab = self.tabs.first(where: { $0.id == id }) else { return }
@@ -144,12 +163,14 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// Tabs on top, editor and sidebar side by side, the image strip under them, then the status
     /// line. The ⌘K switcher lies over all of it.
     private func setUpLayout() {
-        let row = NSStackView(views: [scrollView, sidebar.view])
+        let row = NSStackView(views: [scrollView, transcript.view, sidebar.view])
         row.orientation = .horizontal
         row.spacing = 0
         row.alignment = .height
         row.detachesHiddenViews = true
         scrollView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        transcript.view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        transcript.view.isHidden = true
         sidebar.view.isHidden = true
         let sidebarWidth = sidebar.view.widthAnchor.constraint(equalToConstant: 300)
         sidebarWidth.priority = .defaultHigh
@@ -212,6 +233,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         if panel.firstResponder !== sidebar.table, !switcher.isOpen { focusEditor() }
+        if showingTranscript { transcript.appeared() }
     }
 
     func hide(event: String = "promptbox-closed") {
@@ -284,7 +306,10 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         scheduleSave()
     }
 
-    func closeCurrentTab() { close(current) }
+    /// The transcript tab stays.
+    func closeCurrentTab() {
+        if !showingTranscript { close(current) }
+    }
 
     func reopenClosedTab() {
         guard let prompt = closedTabs.popLast() else { return }
@@ -305,9 +330,39 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         selectTab(at: number == 9 ? tabs.count - 1 : number - 1)
     }
 
+    /// Cycles through the transcript tab too, which sits before the first tab.
     func selectTab(offset: Int) {
-        guard let index = tabs.firstIndex(where: { $0 === current }) else { return }
-        selectTab(at: (index + offset + tabs.count) % tabs.count)
+        guard let index = showingTranscript ? -1 : tabs.firstIndex(where: { $0 === current }) else { return }
+        let count = tabs.count + 1
+        let next = ((index + 1 + offset) % count + count) % count - 1
+        if next < 0 { showTranscript() } else { selectTab(at: next) }
+    }
+
+    /// ⌘⇧A: the transcript, or back to the tab from before it.
+    func toggleTranscript() {
+        if showingTranscript { select(current) } else { showTranscript() }
+    }
+
+    func showTranscript() {
+        if !showingTranscript {
+            textView.breakUndoCoalescing()
+            current.selection = textView.selectedRanges
+            current.scrollOrigin = scrollView.contentView.bounds.origin
+            showingTranscript = true
+            if persist { UserDefaults.standard.set(true, forKey: Self.transcriptKey) }
+            scrollView.isHidden = true
+            strip.isHidden = true
+            transcript.view.isHidden = false
+            refreshTabBar(force: true)
+            updateStatus()
+        }
+        if !switcher.isOpen { focusEditor() }
+        if panel.isVisible { transcript.appeared() }
+    }
+
+    func findPromptsInTranscript() {
+        if !showingTranscript { showTranscript() }
+        transcript.findPrompts()
     }
 
     func toggleSwitcher() {
@@ -316,7 +371,17 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
     /// Shows `tab` in the editor, keeping the outgoing tab's cursor and scroll position.
     func select(_ tab: Tab) {
-        if let current, current !== tab {
+        if showingTranscript {
+            showingTranscript = false
+            if persist { UserDefaults.standard.set(false, forKey: Self.transcriptKey) }
+            transcript.view.isHidden = true
+            scrollView.isHidden = false
+            strip.isHidden = false
+            if current === tab {
+                textView.setSelectedRanges(tab.selection, affinity: .downstream, stillSelecting: false)
+                scrollView.contentView.scroll(to: tab.scrollOrigin)
+            }
+        } else if let current, current !== tab {
             // End the typing undo group so it doesn't run on into the next tab's text.
             textView.breakUndoCoalescing()
             current.selection = textView.selectedRanges
@@ -345,7 +410,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         let titles = tabs.map(\.title)
         guard force || titles != shownTitles else { return }
         shownTitles = titles
-        tabBar.update(titles: titles, selected: tabs.firstIndex { $0 === current } ?? 0)
+        tabBar.update(titles: titles, selected: showingTranscript ? nil : tabs.firstIndex { $0 === current } ?? 0)
     }
 
     /// Every tab but the current one by most recent use, then the current one, so ⌘K then Return
@@ -362,6 +427,10 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// Puts the prompt on the clipboard, files it in history and closes its tab. With `paste`,
     /// Hammerspoon then pastes it into the window that was focused before PromptBox opened.
     func send(paste: Bool) {
+        if showingTranscript {
+            sendTranscriptPrompt(paste: paste)
+            return
+        }
         let tab = current!
         let prompt = tab.prompt
         guard !prompt.isEmpty else {
@@ -384,6 +453,17 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         hide(event: paste ? "promptbox-paste" : "promptbox-closed")
     }
 
+    /// ⌘↩ on a prompt in the transcript tab sends it as is, without opening a tab.
+    private func sendTranscriptPrompt(paste: Bool) {
+        guard let candidate = transcript.selectedCandidate else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(candidate.prompt, forType: .string)
+        history.add(NSAttributedString(string: candidate.prompt))
+        transcript.consume(candidate)
+        hide(event: paste ? "promptbox-paste" : "promptbox-closed")
+    }
+
     func toggleSidebar(_ mode: SidebarMode) {
         if !sidebar.view.isHidden, sidebar.mode == mode {
             sidebar.view.isHidden = true
@@ -401,7 +481,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     }
 
     private func focusEditor() {
-        panel.makeFirstResponder(textView)
+        if showingTranscript { transcript.focus() } else { panel.makeFirstResponder(textView) }
     }
 
     /// Return on a sidebar row: deleted text goes in at the cursor and deleted images back into the
@@ -410,6 +490,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         switch mode {
         case .deleted:
             guard let stored = deleted.text(for: id) else { return }
+            if showingTranscript { select(current) }
             let entry = Prompt(stored)
             if !entry.text.isEmpty { textView.insertText(entry.text, replacementRange: textView.selectedRange()) }
             if !entry.images.isEmpty { insertImages(entry.images, at: strip.images.count) }
@@ -534,6 +615,10 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     }
 
     private func updateStatus() {
+        if showingTranscript {
+            status.stringValue = "↩ open in a tab   ⌘↩ send   ⌫ dismiss   ⌘R find prompts   ⇥ other list   ⌘⇧A back   esc hide"
+            return
+        }
         let words = textView.string.split { $0.isWhitespace || $0.isNewline }.count
         let images = strip.images.count
         var counts = "\(words) word\(words == 1 ? "" : "s")"
@@ -578,6 +663,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
             if !tabs.isEmpty {
                 applyFont()
                 select(selected ?? tabs[0])
+                if UserDefaults.standard.bool(forKey: Self.transcriptKey) { showTranscript() }
                 return
             }
         }

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import PromptBoxCore
 
 /// `PROMPTBOX_SELFTEST=/some/dir PromptBox.app/Contents/MacOS/PromptBox` types, pastes three
@@ -15,6 +16,14 @@ enum SelfTest {
         Self.window = window
         window.panel.setFrame(NSRect(x: 0, y: 0, width: 640, height: 525), display: false)
         window.panel.contentView?.layoutSubtreeIfNeeded()
+        if let audio = ProcessInfo.processInfo.environment["PROMPTBOX_SELFTEST_AUDIO"] {
+            transcribe(URL(fileURLWithPath: audio))
+            return
+        }
+        if ProcessInfo.processInfo.environment["PROMPTBOX_SELFTEST_TRANSCRIPT"] != nil {
+            runTranscript(window, into: dir)
+            return
+        }
         let text = window.textView
         text.string = ""
 
@@ -62,5 +71,69 @@ enum SelfTest {
         print("WINDOW \(window.panel.windowNumber)")
         fflush(stdout)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+    }
+
+    /// Plays an audio file through the same transcription path as the microphone, in real time,
+    /// and prints each finished segment with its offset from the start.
+    private static func transcribe(_ url: URL) {
+        Task { @MainActor in
+            do {
+                let file = try AVAudioFile(forReading: url)
+                let stream = try await SpeechStream.make(locale: Locale(identifier: "en-US"))
+                let began = Date()
+                stream.onFinal = { segment in
+                    print(String(format: "SEGMENT %.1f-%.1f %@", segment.start.timeIntervalSince(began),
+                                 segment.end.timeIntervalSince(began), segment.text))
+                    fflush(stdout)
+                }
+                let chunk: AVAudioFrameCount = 4096
+                while file.framePosition < file.length {
+                    guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: chunk) else { break }
+                    try file.read(into: buffer, frameCount: chunk)
+                    stream.feed(buffer)
+                    try await Task.sleep(for: .seconds(Double(buffer.frameLength) / file.processingFormat.sampleRate))
+                }
+                await stream.finish()
+                try await Task.sleep(for: .milliseconds(300))
+            } catch {
+                print("FAILED \(error)")
+            }
+            exit(0)
+        }
+    }
+
+    /// Fills the transcript with made-up speech, opens the transcript tab (which asks claude for
+    /// the prompts in it), writes what came back to `transcript.txt`, and shows the window.
+    private static func runTranscript(_ window: PromptWindow, into dir: URL) {
+        let lines = [
+            (0, "okay so the sidebar um overlaps the editor when the window is really narrow"),
+            (4, "we should probably collapse it under like 600 points"),
+            (40, "yeah I'll be there in five minutes, just finishing something"),
+            (95, "and in the fuzzy search add a test for typos like sidbar and promtp"),
+            (99, "oh and the sidebar thing, keep the deleted list open when it collapses"),
+            (140, "in today's video we're going to look at the best mechanical keyboards of 2026"),
+        ]
+        let start = Date().addingTimeInterval(-600)
+        window.transcript.seed(lines.map { offset, text in
+            TranscriptSegment(start: start.addingTimeInterval(TimeInterval(offset)),
+                              end: start.addingTimeInterval(TimeInterval(offset) + 3), text: text)
+        })
+        window.panel.orderFrontRegardless()
+        window.showTranscript()
+        print("WINDOW \(window.panel.windowNumber)")
+        fflush(stdout)
+        func finish() {
+            guard !window.transcript.isFindingPrompts else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { finish() } }
+                return
+            }
+            let report = window.transcript.candidates.map { "# \($0.title)\n\($0.prompt)\n  from: \($0.quote)" }
+                .joined(separator: "\n\n")
+            try? report.write(to: dir.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
+            print(report.isEmpty ? "NO PROMPTS" : report)
+            fflush(stdout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
     }
 }

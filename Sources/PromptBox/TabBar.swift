@@ -1,17 +1,26 @@
 import AppKit
 
-/// A row of browser-style tabs with a + at the end. Tabs share the width, each between
-/// `minWidth` and `maxWidth`; the selected one takes the editor's colour so it joins the page.
+/// A row of browser-style tabs with a + at the end, after the pinned transcript tab. Tabs share
+/// the width, each between `minWidth` and `maxWidth`; the selected one takes the editor's colour
+/// so it joins the page.
 @MainActor
 final class TabBar: NSView {
     static let height: CGFloat = 32
     private static let minWidth: CGFloat = 70
     private static let maxWidth: CGFloat = 220
+    private static let pinnedWidth: CGFloat = 44
 
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onNew: (() -> Void)?
+    var onSelectTranscript: (() -> Void)?
 
+    /// The waveform shows while the microphone is on, a crossed-out mic while it isn't.
+    var listening = false {
+        didSet { pinned.symbolName = listening ? "waveform" : "mic.slash" }
+    }
+
+    private let pinned = TabItem(pinned: true)
     private var items: [TabItem] = []
     private let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")!,
                                 target: nil, action: nil)
@@ -26,13 +35,18 @@ final class TabBar: NSView {
         plus.target = self
         plus.action = #selector(newClicked)
         addSubview(plus)
+        pinned.symbolName = "mic.slash"
+        pinned.toolTip = "Transcript (⌘⇧A)"
+        pinned.onSelect = { [weak self] in self?.onSelectTranscript?() }
+        addSubview(pinned)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
 
-    func update(titles: [String], selected: Int) {
+    /// `selected` is nil while the transcript tab is showing.
+    func update(titles: [String], selected: Int?) {
         while items.count < titles.count {
             let item = TabItem()
             item.onSelect = { [weak self, weak item] in
@@ -52,6 +66,7 @@ final class TabBar: NSView {
             item.number = i + 1
             item.isSelected = i == selected
         }
+        pinned.isSelected = selected == nil
         needsLayout = true
     }
 
@@ -59,9 +74,10 @@ final class TabBar: NSView {
         super.layout()
         let plusWidth: CGFloat = 30
         let left: CGFloat = 8
-        let available = bounds.width - left - plusWidth - 8
+        pinned.frame = NSRect(x: left, y: 4, width: Self.pinnedWidth, height: bounds.height - 4)
+        let available = bounds.width - left - Self.pinnedWidth - plusWidth - 8
         let width = items.isEmpty ? 0 : min(Self.maxWidth, max(Self.minWidth, (available / CGFloat(items.count)).rounded(.down)))
-        var x = left
+        var x = left + Self.pinnedWidth
         for item in items {
             item.frame = NSRect(x: x, y: 4, width: width, height: bounds.height - 4)
             x += width
@@ -90,13 +106,25 @@ private final class TabItem: NSView {
     var number = 0
     var isSelected = false { didSet { refresh() } }
     private var hovering = false { didSet { refresh() } }
+    /// Pinned tabs show an icon instead of a title and can't be closed.
+    private let isPinned: Bool
+    var symbolName: String? {
+        didSet {
+            icon.image = symbolName.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: toolTip) }
+        }
+    }
 
     private let label = NSTextField(labelWithString: "")
+    private let icon = NSImageView()
     private let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")!,
                                  target: nil, action: nil)
 
-    init() {
+    init(pinned: Bool = false) {
+        isPinned = pinned
         super.init(frame: .zero)
+        icon.symbolConfiguration = .init(pointSize: 13, weight: .medium)
+        icon.isHidden = !pinned
+        label.isHidden = pinned
         label.font = .systemFont(ofSize: 12)
         label.lineBreakMode = .byTruncatingTail
         label.cell?.truncatesLastVisibleLine = true
@@ -108,6 +136,7 @@ private final class TabItem: NSView {
         close.action = #selector(closeClicked)
         close.toolTip = "Close tab (⌘W)"
         addSubview(label)
+        addSubview(icon)
         addSubview(close)
         refresh()
     }
@@ -118,6 +147,7 @@ private final class TabItem: NSView {
 
     override func layout() {
         super.layout()
+        icon.frame = bounds.insetBy(dx: 6, dy: 4)
         let closeSize: CGFloat = 16
         close.frame = NSRect(x: bounds.width - closeSize - 8, y: (bounds.height - closeSize) / 2, width: closeSize, height: closeSize)
         let labelHeight = label.intrinsicContentSize.height
@@ -137,12 +167,13 @@ private final class TabItem: NSView {
 
     /// Middle click closes, as in browsers.
     override func otherMouseUp(with event: NSEvent) {
-        if event.buttonNumber == 2 { onClose?() }
+        if event.buttonNumber == 2, !isPinned { onClose?() }
     }
 
     private func refresh() {
         label.textColor = isSelected ? .labelColor : .secondaryLabelColor
-        close.isHidden = !(isSelected || hovering)
+        icon.contentTintColor = isSelected ? .labelColor : .secondaryLabelColor
+        close.isHidden = isPinned || !(isSelected || hovering)
         needsDisplay = true
     }
 

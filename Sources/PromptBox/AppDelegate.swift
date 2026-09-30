@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = PromptWindow()
         window.onHide = { [weak self] event in self?.notifyHammerspoon(event) }
         installTabKeys()
+        window.listener?.start()
     }
 
     /// ⌃Tab and ⌃⇧Tab switch tabs. They're caught before the text view sees them, since a text
@@ -42,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// `promptbox://show`, `promptbox://hide` and `promptbox://toggle`. Show takes the centre of the
+    /// `promptbox://show`, `promptbox://hide` and `promptbox://toggle`, and `promptbox://pause` and
+    /// `promptbox://listen` for the microphone. Show takes the centre of the
     /// focused window as `?x=&y=` in Hammerspoon coordinates (origin at the top left of the
     /// primary screen) and opens on that window's screen.
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -53,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "hide": window.hide()
             case "toggle":
                 if window.panel.isVisible && NSApp.isActive { window.hide() } else { window.show(near: anchor(from: url)) }
+            case "listen": window.listener?.setPaused(false)
+            case "pause": window.listener?.setPaused(true)
             default: break
             }
         }
@@ -65,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         window.saveNow()
+        window.listener?.stop()
     }
 
     private func anchor(from url: URL) -> NSPoint? {
@@ -132,6 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabs.addItem(withTitle: "Close Tab", action: #selector(closeTab), keyEquivalent: "w").target = self
         tabs.addItem(withTitle: "Reopen Closed Tab", action: #selector(reopenTab), keyEquivalent: "T").target = self
         tabs.addItem(.separator())
+        let transcript = tabs.addItem(withTitle: "Transcript", action: #selector(toggleTranscript), keyEquivalent: "A")
+        transcript.target = self
+        tabs.addItem(withTitle: "Find Prompts in Transcript", action: #selector(findPrompts), keyEquivalent: "r").target = self
+        tabs.addItem(withTitle: "Pause or Resume Listening", action: #selector(togglePause), keyEquivalent: "L").target = self
+        tabs.addItem(.separator())
         tabs.addItem(withTitle: "Find Tab…", action: #selector(findTab), keyEquivalent: "k").target = self
         let next = tabs.addItem(withTitle: "Next Tab", action: #selector(nextTab), keyEquivalent: "]")
         next.keyEquivalentModifierMask = [.command, .shift]
@@ -167,6 +177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func closeTab() { window.closeCurrentTab() }
     @objc private func reopenTab() { window.reopenClosedTab() }
     @objc private func findTab() { window.toggleSwitcher() }
+    @objc private func toggleTranscript() { window.toggleTranscript() }
+    @objc private func findPrompts() { window.findPromptsInTranscript() }
+    @objc private func togglePause() {
+        guard let listener = window.listener else { return }
+        listener.setPaused(!listener.isPaused)
+    }
     @objc private func nextTab() { window.selectTab(offset: 1) }
     @objc private func previousTab() { window.selectTab(offset: -1) }
     @objc private func selectNumberedTab(_ sender: NSMenuItem) { window.selectTab(number: sender.tag) }

@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "PromptBox",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS("26.0")],
     targets: [
         .target(name: "PromptBoxCore"),
         .executableTarget(name: "PromptBox", dependencies: ["PromptBoxCore"]),

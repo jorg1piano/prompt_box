@@ -20,6 +20,9 @@ you've resized it before.
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⌘⇧]` / `⌘⇧[`) |
 | `⌘1`–`⌘8`, `⌘9` | That tab, the last tab |
 | `⌘K` | Search tabs |
+| `⌘⇧A` | Transcript tab, or back to the tab before it |
+| `⌘R` | Find prompts in the transcript |
+| `⌘⇧L` | Pause or resume listening |
 | `⌘D` | Deleted text and images |
 | `⌘Y` | History of sent prompts |
 | `⌘⇧K` | Delete the lines the selection touches |
@@ -36,6 +39,36 @@ first line. Sending a prompt closes its tab; closing the last tab leaves an empt
 line that matched. The best match is highlighted: ↑/↓ or ⌃P/⌃N move, Return switches, Esc
 closes. With nothing typed, the list starts with the tab you used before this one, so `⌘K`
 then Return flips between two tabs. Matching lives in `Sources/PromptBoxCore/FuzzyMatch.swift`.
+
+## Transcript
+
+PromptBox listens to the microphone from launch and writes down everything it hears, on this
+Mac, with the `SpeechAnalyzer` transcriber that macOS 26 added. The pinned tab at the left of
+the tab bar (`⌘⇧A`) shows it as a thread, one message per stretch of speech with a gap of
+under 10 seconds, with the words still being recognised at the bottom. The tab's icon is a
+waveform while the microphone is on and a crossed-out mic while it's paused.
+
+Opening the tab reads what you said since the last time and asks `claude -p` (Haiku, no tools,
+no session) for the prompts in it. It leaves out talk that isn't meant for an agent, joins
+remarks about the same task even when other talk sits between them, and rewrites each one as
+you would have typed it. The prompts show above the thread with the words they came from, and
+the thread marks those messages with a bar.
+
+- Return on a prompt opens it in a new tab to edit; `⌘↩` sends it straight to the terminal.
+  `⌫` dismisses it.
+- Select messages in the thread (⇥ moves between the lists) and press Return to open their raw
+  text in a tab, or `⌘R` to ask for the prompts in just those.
+- One pass reads at most the newest 12,000 words.
+
+Transcripts are kept forever as one JSON line per segment in
+`~/Library/Application Support/PromptBox/transcripts/<date>.jsonl`; the prompts waiting in the
+tab are in `prompts.json` next to them.
+
+To keep it listening, add PromptBox to System Settings › General › Login Items.
+`promptbox://pause` and `promptbox://listen` switch the microphone from Hammerspoon.
+`defaults write no.devda.PromptBox transcriptLocale en-GB` picks the language,
+`groupingModel sonnet` a different model, and `claudePath` the claude binary if PromptBox can't
+find it.
 
 ## Images
 
@@ -82,10 +115,15 @@ remembers the focused window on hyper+p, gives it focus back on `promptbox-close
 swift test                  # core logic: deletion joining, fuzzy search, export, storage
 ```
 
-Requires macOS 15.
+Requires macOS 26.
 
 `PROMPTBOX_SELFTEST=/some/dir build/PromptBox.app/Contents/MacOS/PromptBox` types, pastes
 three images, deletes a word, a line and an image, writes what it would send to
 `report.txt`, opens two more tabs and runs a misspelled `⌘K` search, then shows the window for
 three seconds (for `screencapture -l`) and quits. Set `PROMPTBOX_SELFTEST_SIDEBAR=1` to show
 the deleted list instead of the search. It never touches your saved tabs or lists.
+
+`PROMPTBOX_SELFTEST_TRANSCRIPT=1` instead fills the transcript with made-up speech, opens the
+transcript tab (a real `claude -p` call) and writes the prompts it found to `transcript.txt`.
+`PROMPTBOX_SELFTEST_AUDIO=<file>` plays an audio file through the transcriber in real time and
+prints each segment.
