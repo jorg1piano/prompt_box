@@ -58,10 +58,14 @@ a numbered list when there are several tasks. The thread marks the messages it u
 The suggestion is plain text you edit like any tab. It's only rewritten when you open the tab
 after saying something new, and never over your edits.
 
-- `⌘↩` sends it to the terminal, `⌘⇧↩` copies it; both file it in history (`⌘Y`) and empty
-  the suggestion until you say something new. `⌘O` opens it in a new tab instead.
-- `⌘R` rewrites it from the last 5 minutes, or from the thread messages you selected. It
-  replaces your edits; `⌘Z` brings them back.
+- `⌘↩` sends it to the terminal, `⌘⇧↩` copies it; both file it in history (`⌘Y`). `⌘O`
+  opens it in a new tab instead.
+- Sending, copying or opening it, or deleting all its text, starts a new prompt: from then on
+  the suggestion only reads speech that began after that moment, so the last prompt's words
+  don't leak into the next one. Undoing the delete brings the text back but not the old
+  speech.
+- `⌘R` rewrites it from the last 5 minutes of the current prompt, or from the thread messages
+  you selected, which can be from before it. It replaces your edits; `⌘Z` brings them back.
 - ⇥ moves to the thread. Return there opens the selected messages' raw text in a tab.
 
 ### Videos and calls
@@ -143,5 +147,8 @@ the deleted list instead of the search. It never touches your saved tabs or list
 
 `PROMPTBOX_SELFTEST_TRANSCRIPT=1` instead fills the transcript with made-up speech, opens the
 transcript tab (a real `claude -p` call) and writes the suggested prompt to `transcript.txt`.
+It then copies it (checking the clipboard and history, then putting your clipboard back), says
+something new, and deletes the suggestion and says something else, printing the prompt
+written after each, to show that neither reads speech from before.
 `PROMPTBOX_SELFTEST_AUDIO=<file>` plays an audio file through the transcriber in real time and
 prints each segment.

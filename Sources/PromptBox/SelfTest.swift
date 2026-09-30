@@ -103,7 +103,9 @@ enum SelfTest {
     }
 
     /// Fills the transcript with made-up speech, opens the transcript tab (which asks claude for
-    /// a prompt from it), writes the suggestion to `transcript.txt`, and shows the window.
+    /// a prompt from it) and writes the suggestion to `transcript.txt`. Then copies it, says
+    /// something new, deletes it and says something else, printing each prompt written, to
+    /// show that a new prompt only reads speech from after it started.
     private static func runTranscript(_ window: PromptWindow, into dir: URL) {
         let lines = [
             (0, "okay so the sidebar um overlaps the editor when the window is really narrow"),
@@ -129,12 +131,21 @@ enum SelfTest {
         window.panel.makeKeyAndOrderFront(nil)
         print("WINDOW \(window.panel.windowNumber)")
         fflush(stdout)
-        func finish() {
-            guard !window.transcript.isWriting else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { finish() } }
-                return
+        let panel = window.transcript
+        /// Runs `then` once the model has answered.
+        func afterWriting(_ then: @escaping () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated { panel.isWriting ? afterWriting(then) : then() }
             }
-            let report = window.transcript.suggestionText
+        }
+        /// Says `text` a second from now and opens the tab again.
+        func say(_ text: String) {
+            let at = Date().addingTimeInterval(1)
+            panel.seed([TranscriptSegment(start: at, end: at.addingTimeInterval(2), text: text)])
+            panel.appeared()
+        }
+        afterWriting {
+            let report = panel.suggestionText
             try? report.write(to: dir.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
             print("SUGGESTION:\n" + (report.isEmpty ? "(empty)" : report))
             // ⌘⇧↩: copy and file in history. The clipboard gets its old text back afterwards.
@@ -143,12 +154,26 @@ enum SelfTest {
             window.send(paste: false)
             let copied = pasteboard.string(forType: .string) == report
             let filed = window.history.entries.first.flatMap { window.history.text(for: $0.id)?.string } == report
-            print("COPY: clipboard \(copied ? "ok" : "wrong"), history \(filed ? "ok" : "wrong"), suggestion now \(window.transcript.suggestionText.isEmpty ? "empty" : "not empty")")
+            print("COPY: clipboard \(copied ? "ok" : "wrong"), history \(filed ? "ok" : "wrong"), suggestion now \(panel.suggestionText.isEmpty ? "empty" : "not empty")")
             pasteboard.clearContents()
             if let saved { pasteboard.setString(saved, forType: .string) }
+
+            // A new prompt after copying: only speech from after the copy goes in.
+            say("rename the Grouper file to Suggester")
+            afterWriting {
+                print("AFTER COPY:\n" + panel.suggestionText)
+                // Emptying it by hand starts another.
+                window.panel.makeFirstResponder(panel.editor)
+                panel.editor.selectAll(nil)
+                panel.editor.deleteBackward(nil)
+                say("make the thread font one point bigger")
+                afterWriting {
+                    print("AFTER DELETE:\n" + panel.suggestionText)
+                    fflush(stdout)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(0) }
+                }
+            }
             fflush(stdout)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
     }
 }

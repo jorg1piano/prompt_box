@@ -10,12 +10,17 @@ public struct Suggestion: Codable, Equatable {
     public var through: Date?
     /// Changed by hand since it was written, so opening the tab doesn't replace it.
     public var edited: Bool
+    /// When the user started a new prompt, by emptying the suggestion or sending, copying or
+    /// opening it. Suggestions only read speech that began after this.
+    public var newPromptFrom: Date?
 
-    public init(text: String = "", segmentIDs: [String] = [], through: Date? = nil, edited: Bool = false) {
+    public init(text: String = "", segmentIDs: [String] = [], through: Date? = nil, edited: Bool = false,
+                newPromptFrom: Date? = nil) {
         self.text = text
         self.segmentIDs = segmentIDs
         self.through = through
         self.edited = edited
+        self.newPromptFrom = newPromptFrom
     }
 }
 
@@ -62,14 +67,15 @@ public enum PromptSuggestion {
     "segments":{"type":"array","items":{"type":"integer"}}},"required":["prompt","segments"]}
     """
 
-    /// The segments said within `minutes` of the newest one, capped at `maxWords` from the newest
-    /// back. Anchored to the newest segment rather than now, so a quiet spell before opening
-    /// the tab doesn't leave it empty.
-    public static func recent(_ segments: [TranscriptSegment], minutes: Double = defaultMinutes,
-                              maxWords: Int = maxWords) -> [TranscriptSegment] {
-        guard let newest = segments.map(\.end).max() else { return [] }
+    /// The segments said within `minutes` of the newest one and begun after `newPromptFrom`,
+    /// capped at `maxWords` from the newest back. Anchored to the newest segment rather than
+    /// now, so a quiet spell before opening the tab doesn't leave it empty.
+    public static func recent(_ segments: [TranscriptSegment], after newPromptFrom: Date? = nil,
+                              minutes: Double = defaultMinutes, maxWords: Int = maxWords) -> [TranscriptSegment] {
+        let fresh = newPromptFrom.map { from in segments.filter { $0.start >= from } } ?? segments
+        guard let newest = fresh.map(\.end).max() else { return [] }
         let from = newest.addingTimeInterval(-minutes * 60)
-        return limit(segments.filter { $0.end >= from }, maxWords: maxWords)
+        return limit(fresh.filter { $0.end >= from }, maxWords: maxWords)
     }
 
     /// The newest segments that fit in `maxWords`, oldest first.

@@ -99,24 +99,38 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
             split.setPosition((split.bounds.height * 0.4).rounded(), ofDividerAt: 0)
         }
         scrollThreadToEnd()
-        let newest = segments.last?.end ?? .distantPast
-        let edited = store.suggestion.edited && !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if newest > store.suggestion.through ?? .distantPast {
-            if edited {
-                note.stringValue = "You said more since this was written. ⌘R rewrites it from the last \(minutesLabel) (⌘Z undoes)."
-            } else {
-                write(from: PromptSuggestion.recent(segments, minutes: minutes))
-            }
+        let fresh = recentSpeech
+        guard let newest = fresh.last?.end, newest > store.suggestion.through ?? .distantPast else { return }
+        if store.suggestion.edited, !isEmpty {
+            note.stringValue = "You said more since this was written. ⌘R rewrites it from the last \(minutesLabel) (⌘Z undoes)."
+        } else {
+            write(from: fresh)
         }
     }
 
-    /// After the suggestion is sent or opened in a tab: empty until something new is said.
+    /// After the suggestion is sent, copied or opened in a tab: a new prompt starts, written only
+    /// from what's said from now on.
     func clearSuggestion() {
         replaceText(with: "")
-        store.suggestion = Suggestion(through: store.suggestion.through)
+        startNewPrompt()
+        note.stringValue = ""
+    }
+
+    /// Speech from before now no longer counts towards the suggestion.
+    private func startNewPrompt() {
+        store.suggestion = Suggestion(through: store.suggestion.through, newPromptFrom: Date())
         usedSegments = []
         thread.reloadData()
-        note.stringValue = ""
+        refreshPlaceholder()
+    }
+
+    /// The last few minutes of speech, from after the current prompt was started.
+    private var recentSpeech: [TranscriptSegment] {
+        PromptSuggestion.recent(segments, after: store.suggestion.newPromptFrom, minutes: minutes)
+    }
+
+    private var isEmpty: Bool {
+        suggestionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc func openInTab() {
@@ -138,8 +152,11 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     /// ⌘Z brings them back.
     @objc func rewrite() {
         let rows = thread.selectedRowIndexes.filter { $0 < bubbles.count }
-        let chosen = rows.isEmpty ? PromptSuggestion.recent(segments, minutes: minutes)
-            : PromptSuggestion.limit(rows.flatMap { bubbles[$0].segments })
+        if rows.isEmpty, recentSpeech.isEmpty, let from = store.suggestion.newPromptFrom {
+            note.stringValue = "Nothing said since the new prompt at \(label(for: from)). Select messages in the thread to use earlier speech."
+            return
+        }
+        let chosen = rows.isEmpty ? recentSpeech : PromptSuggestion.limit(rows.flatMap { bubbles[$0].segments })
         write(from: chosen)
     }
 
@@ -163,13 +180,14 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
                 self.refreshPlaceholder()
             }
             do {
-                let suggestion = try await Suggester.suggestion(from: chosen, echo: echo)
+                var suggestion = try await Suggester.suggestion(from: chosen, echo: echo)
                 if typedWhileWriting {
                     store.suggestion.through = suggestion.through
                     note.stringValue = "Kept what you typed. ⌘R replaces it with a rewrite from \(range)."
                     return
                 }
                 replaceText(with: suggestion.text)
+                suggestion.newPromptFrom = store.suggestion.newPromptFrom
                 store.suggestion = suggestion
                 usedSegments = Set(suggestion.segmentIDs)
                 thread.reloadData()
@@ -201,8 +219,13 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
 
     private func refreshPlaceholder() {
         placeholder.isHidden = !editor.string.isEmpty
-        placeholder.stringValue = isWriting ? "Writing…"
-            : "Say what you want done. Opening this tab writes a prompt from the last \(minutesLabel), and you can edit it here."
+        if isWriting {
+            placeholder.stringValue = "Writing…"
+        } else if let from = store.suggestion.newPromptFrom {
+            placeholder.stringValue = "New prompt. Opening this tab writes it from what you say after \(label(for: from)), and you can edit it here."
+        } else {
+            placeholder.stringValue = "Say what you want done. Opening this tab writes a prompt from the last \(minutesLabel), and you can edit it here."
+        }
     }
 
     private var minutesLabel: String {
@@ -213,12 +236,19 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
 
     func undoManager(for view: NSTextView) -> UndoManager? { editorUndo }
 
+    /// Emptying the suggestion by hand starts a new prompt, the same as sending it.
     func textDidChange(_ notification: Notification) {
         refreshPlaceholder()
         guard !settingText else { return }
+        if isWriting { typedWhileWriting = true }
+        let hadText = !store.suggestion.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if isEmpty, hadText {
+            startNewPrompt()
+            note.stringValue = "New prompt: only what you say from now on goes into it."
+            return
+        }
         store.suggestion.text = suggestionText
         store.suggestion.edited = true
-        if isWriting { typedWhileWriting = true }
     }
 
     /// Esc hides the window; Tab goes to the thread, since a prompt rarely needs a tab character.

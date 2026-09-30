@@ -55,6 +55,12 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(PromptSuggestion.recent([], minutes: 5), [])
     }
 
+    func testRecentSkipsSpeechFromBeforeANewPrompt() {
+        let segments = [segment(0, "the old prompt"), segment(30, "still old"), segment(60, "the new one")]
+        XCTAssertEqual(PromptSuggestion.recent(segments, after: t0.addingTimeInterval(40), minutes: 5).map(\.text), ["the new one"])
+        XCTAssertEqual(PromptSuggestion.recent(segments, after: t0.addingTimeInterval(90), minutes: 5), [])
+    }
+
     func testInputNumbersSegments() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -86,7 +92,8 @@ final class TranscriptTests: XCTestCase {
         let url = dir.appendingPathComponent("suggestion.json")
         let store = SuggestionStore(url: url)
         XCTAssertEqual(store.suggestion, Suggestion())
-        store.suggestion = Suggestion(text: "Fix it", segmentIDs: ["a"], through: t0.addingTimeInterval(62.5), edited: true)
+        store.suggestion = Suggestion(text: "Fix it", segmentIDs: ["a"], through: t0.addingTimeInterval(62.5), edited: true,
+                                      newPromptFrom: t0.addingTimeInterval(30))
         XCTAssertEqual(SuggestionStore(url: url).suggestion, store.suggestion)
     }
 }
