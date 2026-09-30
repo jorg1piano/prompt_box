@@ -21,7 +21,8 @@ you've resized it before.
 | `⌘1`–`⌘8`, `⌘9` | That tab, the last tab |
 | `⌘K` | Search tabs |
 | `⌘⇧A` | Transcript tab, or back to the tab before it |
-| `⌘R` | Find prompts in the transcript |
+| `⌘R` | Rewrite the suggested prompt from the transcript |
+| `⌘O` | Open the suggested prompt in a tab |
 | `⌘⇧L` | Pause or resume listening |
 | `⌘D` | Deleted text and images |
 | `⌘Y` | History of sent prompts |
@@ -48,17 +49,20 @@ the tab bar (`⌘⇧A`) shows it as a thread, one message per stretch of speech 
 under 10 seconds, with the words still being recognised at the bottom. The tab's icon is a
 waveform while the microphone is on and a crossed-out mic while it's paused.
 
-Opening the tab reads what you said since the last time and asks `claude -p` (Haiku, no tools,
-no session) for the prompts in it. It leaves out talk that isn't meant for an agent, joins
-remarks about the same task even when other talk sits between them, and rewrites each one as
-you would have typed it. The prompts show above the thread with the words they came from, and
-the thread marks those messages with a bar.
+The top of the tab is a suggested prompt: opening the tab sends the last 5 minutes of speech
+(counted back from the last thing you said) to `claude -p` (Sonnet, no tools, no session),
+which writes the prompt you'd type from it. It leaves out talk that isn't meant for an agent,
+keeps remarks about the same task together even when other talk came between them, and makes
+a numbered list when there are several tasks. The thread marks the messages it used with a bar.
 
-- Return on a prompt opens it in a new tab to edit; `⌘↩` sends it straight to the terminal.
-  `⌫` dismisses it.
-- Select messages in the thread (⇥ moves between the lists) and press Return to open their raw
-  text in a tab, or `⌘R` to ask for the prompts in just those.
-- One pass reads at most the newest 12,000 words.
+The suggestion is plain text you edit like any tab. It's only rewritten when you open the tab
+after saying something new, and never over your edits.
+
+- `⌘↩` sends it to the terminal, `⌘⇧↩` copies it; both file it in history (`⌘Y`) and empty
+  the suggestion until you say something new. `⌘O` opens it in a new tab instead.
+- `⌘R` rewrites it from the last 5 minutes, or from the thread messages you selected. It
+  replaces your edits; `⌘Z` brings them back.
+- ⇥ moves to the thread. Return there opens the selected messages' raw text in a tab.
 
 ### Videos and calls
 
@@ -67,7 +71,7 @@ too (every app but PromptBox, through a Core Audio process tap) and transcribes 
 second transcriber. A microphone segment whose word pairs the speakers played within 3 seconds
 of it is marked: half or more matching means it was the speakers, a quarter or more means it
 mixes your words with theirs (`Sources/PromptBoxCore/EchoMatch.swift`). The thread fades those
-words and shows a speaker icon, and the prompt pass sees them labelled `(speakers)` or
+words and shows a speaker icon, and the suggestion sees them labelled `(speakers)` or
 `(partly speakers)` and leaves them out. Nothing is removed from the transcript. With
 headphones on, the microphone doesn't hear the video, so there's nothing to mark.
 
@@ -76,13 +80,13 @@ nothing gets marked. The two transcribers together use about 9% of one core.
 
 Transcripts are kept forever as one JSON line per segment in
 `~/Library/Application Support/PromptBox/transcripts/<date>.jsonl`, with `"source"` either
-`mic` or `speakers`; the prompts waiting in the tab are in `prompts.json` next to them.
+`mic` or `speakers`; the suggestion and its edits are in `suggestion.json` next to them.
 
 To keep it listening, add PromptBox to System Settings › General › Login Items.
 `promptbox://pause` and `promptbox://listen` switch the microphone from Hammerspoon.
 `defaults write no.devda.PromptBox transcriptLocale en-GB` picks the language,
-`groupingModel sonnet` a different model, and `claudePath` the claude binary if PromptBox can't
-find it.
+`suggestionModel haiku` a different model, `suggestionMinutes 10` a longer stretch of speech,
+and `claudePath` the claude binary if PromptBox can't find it.
 
 ## Images
 
@@ -138,6 +142,6 @@ three seconds (for `screencapture -l`) and quits. Set `PROMPTBOX_SELFTEST_SIDEBA
 the deleted list instead of the search. It never touches your saved tabs or lists.
 
 `PROMPTBOX_SELFTEST_TRANSCRIPT=1` instead fills the transcript with made-up speech, opens the
-transcript tab (a real `claude -p` call) and writes the prompts it found to `transcript.txt`.
+transcript tab (a real `claude -p` call) and writes the suggested prompt to `transcript.txt`.
 `PROMPTBOX_SELFTEST_AUDIO=<file>` plays an audio file through the transcriber in real time and
 prints each segment.

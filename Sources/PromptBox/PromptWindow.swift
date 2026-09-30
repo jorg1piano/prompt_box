@@ -81,7 +81,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         let transcripts = root.appendingPathComponent("transcripts")
         let log = TranscriptLog(directory: transcripts)
         listener = persist ? Listener(log: log) : nil
-        transcript = TranscriptPanel(log: log, store: CandidateStore(url: transcripts.appendingPathComponent("prompts.json")),
+        transcript = TranscriptPanel(log: log, store: SuggestionStore(url: transcripts.appendingPathComponent("suggestion.json")),
                                      listener: listener)
         super.init()
 
@@ -217,6 +217,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
     private func applyFont() {
         let attributes = textAttributes
+        transcript.textAttributes = attributes
         textView.font = attributes[.font] as? NSFont
         textView.defaultParagraphStyle = attributes[.paragraphStyle] as? NSParagraphStyle
         textView.typingAttributes = attributes
@@ -360,9 +361,13 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         if panel.isVisible { transcript.appeared() }
     }
 
-    func findPromptsInTranscript() {
+    func rewriteSuggestion() {
         if !showingTranscript { showTranscript() }
-        transcript.findPrompts()
+        transcript.rewrite()
+    }
+
+    func openSuggestionInTab() {
+        if showingTranscript { transcript.openInTab() }
     }
 
     func toggleSwitcher() {
@@ -453,14 +458,20 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         hide(event: paste ? "promptbox-paste" : "promptbox-closed")
     }
 
-    /// ⌘↩ on a prompt in the transcript tab sends it as is, without opening a tab.
+    /// ⌘↩ and ⌘⇧↩ in the transcript tab send or copy the suggested prompt as it stands, file it
+    /// in history, and empty the suggestion until something new is said.
     private func sendTranscriptPrompt(paste: Bool) {
-        guard let candidate = transcript.selectedCandidate else { return }
+        let text = transcript.suggestionText
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            hide()
+            return
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(candidate.prompt, forType: .string)
-        history.add(NSAttributedString(string: candidate.prompt))
-        transcript.consume(candidate)
+        pasteboard.setString(text, forType: .string)
+        history.add(NSAttributedString(string: text))
+        sidebar.reload()
+        transcript.clearSuggestion()
         hide(event: paste ? "promptbox-paste" : "promptbox-closed")
     }
 
@@ -616,7 +627,7 @@ final class PromptWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
     private func updateStatus() {
         if showingTranscript {
-            status.stringValue = "↩ open in a tab   ⌘↩ send   ⌫ dismiss   ⌘R find prompts   ⇥ other list   ⌘⇧A back   esc hide"
+            status.stringValue = "⌘↩ send   ⌘⇧↩ copy   ⌘R rewrite   ⌘O open in a tab   ⇥ thread   ⌘⇧A back   esc hide"
             return
         }
         let words = textView.string.split { $0.isWhitespace || $0.isNewline }.count

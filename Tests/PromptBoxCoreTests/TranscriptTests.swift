@@ -42,55 +42,52 @@ final class TranscriptTests: XCTestCase {
 
     func testLimitKeepsNewestWords() {
         let segments = [segment(0, "one two three"), segment(10, "four five"), segment(20, "six")]
-        XCTAssertEqual(PromptGrouping.limit(segments, maxWords: 3).map(\.text), ["four five", "six"])
-        XCTAssertEqual(PromptGrouping.limit(segments, maxWords: 100).count, 3)
+        XCTAssertEqual(PromptSuggestion.limit(segments, maxWords: 3).map(\.text), ["four five", "six"])
+        XCTAssertEqual(PromptSuggestion.limit(segments, maxWords: 100).count, 3)
         // A single segment over the limit still goes through.
-        XCTAssertEqual(PromptGrouping.limit([segments[0]], maxWords: 1).count, 1)
+        XCTAssertEqual(PromptSuggestion.limit([segments[0]], maxWords: 1).count, 1)
+    }
+
+    func testRecentCountsBackFromTheNewestSegment() {
+        // Said an hour ago and 6 and 2 minutes before the newest segment.
+        let segments = [segment(-3600, "old"), segment(0, "six minutes"), segment(240, "two minutes"), segment(360, "newest")]
+        XCTAssertEqual(PromptSuggestion.recent(segments, minutes: 5).map(\.text), ["two minutes", "newest"])
+        XCTAssertEqual(PromptSuggestion.recent([], minutes: 5), [])
     }
 
     func testInputNumbersSegments() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
-        let input = PromptGrouping.input(for: [segment(0, "fix it"), segment(65, "thanks")], calendar: calendar)
+        let input = PromptSuggestion.input(for: [segment(0, "fix it"), segment(65, "thanks")], calendar: calendar)
         XCTAssertEqual(input, "[1] 14:13:20 fix it\n[2] 14:14:25 thanks")
     }
 
-    func testCandidatesFromCLIOutput() throws {
+    func testSuggestionFromCLIOutput() throws {
         let segments = [segment(0, "the sidebar overlaps"), segment(5, "lunch?"), segment(9, "collapse it under 600")]
         let json = """
-        {"type":"result","is_error":false,"result":"","structured_output":{"prompts":[
-          {"title":"Fix sidebar","prompt":" Collapse the sidebar under 600pt. ","segments":[3,1,1,9]},
-          {"title":"Empty","prompt":"x","segments":[42]}
-        ]}}
+        {"type":"result","is_error":false,"result":"","structured_output":{
+          "prompt":" Collapse the sidebar under 600pt. ","segments":[3,1,1,9]}}
         """
-        let candidates = try PromptGrouping.candidates(fromCLIOutput: Data(json.utf8), segments: segments)
-        XCTAssertEqual(candidates.count, 1)
-        XCTAssertEqual(candidates[0].prompt, "Collapse the sidebar under 600pt.")
-        XCTAssertEqual(candidates[0].segmentIDs, [segments[0].id, segments[2].id])
-        XCTAssertEqual(candidates[0].spoken, segments[0].start)
-        XCTAssertEqual(candidates[0].quote, "the sidebar overlaps collapse it under 600")
+        let suggestion = try PromptSuggestion.suggestion(fromCLIOutput: Data(json.utf8), segments: segments)
+        XCTAssertEqual(suggestion.text, "Collapse the sidebar under 600pt.")
+        XCTAssertEqual(suggestion.segmentIDs, [segments[0].id, segments[2].id])
+        XCTAssertEqual(suggestion.through, segments[2].end)
+        XCTAssertFalse(suggestion.edited)
     }
 
     func testCLIErrorSurfaces() {
         let json = #"{"type":"result","is_error":true,"result":"Not logged in"}"#
-        XCTAssertThrowsError(try PromptGrouping.candidates(fromCLIOutput: Data(json.utf8), segments: [])) { error in
+        XCTAssertThrowsError(try PromptSuggestion.suggestion(fromCLIOutput: Data(json.utf8), segments: [])) { error in
             XCTAssertEqual(error.localizedDescription, "Not logged in")
         }
     }
 
-    func testCandidateStoreRoundTrips() {
-        let url = dir.appendingPathComponent("candidates.json")
-        let store = CandidateStore(url: url)
-        let old = PromptCandidate(title: "old", prompt: "a", segmentIDs: ["1"], spoken: t0, quote: "a")
-        let new = PromptCandidate(title: "new", prompt: "b", segmentIDs: ["2"], spoken: t0.addingTimeInterval(60), quote: "b")
-        store.add([old, new])
-        store.processedThrough = t0.addingTimeInterval(62.5)
-
-        let reloaded = CandidateStore(url: url)
-        XCTAssertEqual(reloaded.candidates.map(\.title), ["new", "old"])
-        XCTAssertEqual(reloaded.processedThrough, t0.addingTimeInterval(62.5))
-        reloaded.remove(new.id)
-        XCTAssertEqual(CandidateStore(url: url).candidates.map(\.title), ["old"])
+    func testSuggestionStoreRoundTrips() {
+        let url = dir.appendingPathComponent("suggestion.json")
+        let store = SuggestionStore(url: url)
+        XCTAssertEqual(store.suggestion, Suggestion())
+        store.suggestion = Suggestion(text: "Fix it", segmentIDs: ["a"], through: t0.addingTimeInterval(62.5), edited: true)
+        XCTAssertEqual(SuggestionStore(url: url).suggestion, store.suggestion)
     }
 }
 
@@ -131,7 +128,7 @@ final class EchoMatchTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let a = segment(0, "fix it"), b = segment(5, "subscribe"), c = segment(9, "mixed")
-        let input = PromptGrouping.input(for: [a, b, c], echo: [b.id: 0.9, c.id: 0.3], calendar: calendar)
+        let input = PromptSuggestion.input(for: [a, b, c], echo: [b.id: 0.9, c.id: 0.3], calendar: calendar)
         XCTAssertEqual(input, "[1] 14:13:20 fix it\n[2] 14:13:25 (speakers) subscribe\n[3] 14:13:29 (partly speakers) mixed")
     }
 

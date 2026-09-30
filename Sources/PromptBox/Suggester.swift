@@ -1,25 +1,26 @@
 import Foundation
 import PromptBoxCore
 
-/// Runs `claude -p` over transcript segments and returns the prompts it found. It uses the
-/// Claude Code login, no tools and no session, from a folder with no CLAUDE.md in it.
-enum Grouper {
-    /// `haiku` unless the `groupingModel` default says otherwise.
-    static var model: String { UserDefaults.standard.string(forKey: "groupingModel") ?? "haiku" }
+/// Runs `claude -p` over transcript segments and returns the prompt it wrote from them. It uses
+/// the Claude Code login, no tools and no session, from a folder with no CLAUDE.md in it.
+enum Suggester {
+    /// `sonnet` unless the `suggestionModel` default says otherwise. Haiku was slower in testing and
+    /// changed details ("600 points" became "600 pixels").
+    static var model: String { UserDefaults.standard.string(forKey: "suggestionModel") ?? "sonnet" }
 
     /// `echo` marks the segments that were the speakers, from `EchoMatch.scores`.
-    static func candidates(from segments: [TranscriptSegment], echo: [String: Double]) async throws -> [PromptCandidate] {
-        let output = try await runClaude(input: PromptGrouping.input(for: segments, echo: echo))
-        return try PromptGrouping.candidates(fromCLIOutput: output, segments: segments)
+    static func suggestion(from segments: [TranscriptSegment], echo: [String: Double]) async throws -> Suggestion {
+        let output = try await runClaude(input: PromptSuggestion.input(for: segments, echo: echo))
+        return try PromptSuggestion.suggestion(fromCLIOutput: output, segments: segments)
     }
 
     private static func runClaude(input: String) async throws -> Data {
         guard let claude = claudeURL() else {
-            throw PromptGrouping.Failure(message: "Can't find the claude command. Set its path with `defaults write no.devda.PromptBox claudePath /path/to/claude`.")
+            throw PromptSuggestion.Failure(message: "Can't find the claude command. Set its path with `defaults write no.devda.PromptBox claudePath /path/to/claude`.")
         }
         let arguments = ["-p", "--model", model, "--tools", "", "--no-session-persistence", "--setting-sources", "",
-                         "--strict-mcp-config", "--disable-slash-commands", "--system-prompt", PromptGrouping.systemPrompt,
-                         "--output-format", "json", "--json-schema", PromptGrouping.schema]
+                         "--strict-mcp-config", "--disable-slash-commands", "--system-prompt", PromptSuggestion.systemPrompt,
+                         "--output-format", "json", "--json-schema", PromptSuggestion.schema]
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -61,7 +62,7 @@ enum Grouper {
                 // A failed run still prints its JSON result with the reason, so let the parser report that.
                 if process.terminationStatus != 0, output.isEmpty {
                     let message = String(decoding: errors, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                    continuation.resume(throwing: PromptGrouping.Failure(
+                    continuation.resume(throwing: PromptSuggestion.Failure(
                         message: message.isEmpty ? "claude exited with status \(process.terminationStatus)" : message))
                 } else {
                     continuation.resume(returning: output)

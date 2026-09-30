@@ -1,22 +1,22 @@
 import AppKit
 import PromptBoxCore
 
-/// The transcript tab: prompts the model found on top, the live thread of everything heard
-/// below. Opening the tab reads what was said since the last time and adds the prompts in it.
+/// The transcript tab: a suggested prompt on top, written by the model from the last few
+/// minutes of speech and editable like any tab, and the live thread of everything heard below.
 @MainActor
-final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
+final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate, NSTextViewDelegate {
     let view = NSView()
-    let prompts = SidebarTable()
+    let editor = NSTextView(usingTextLayoutManager: false)
     let thread = SidebarTable()
 
-    /// Return on a prompt or on thread messages: open this text in a new tab.
+    /// Open this text in a new tab: the suggestion, or thread messages.
     var onOpen: ((String) -> Void)?
     var onCancel: (() -> Void)?
     /// The microphone started, stopped or failed.
     var onListenerChange: (() -> Void)?
 
     private let log: TranscriptLog
-    private let store: CandidateStore
+    private let store: SuggestionStore
     private let listener: Listener?
     /// What the microphone heard; the thread shows these.
     private var segments: [TranscriptSegment] = []
@@ -25,68 +25,105 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     /// Microphone segment id to the share of its words the speakers were playing.
     private var echo: [String: Double] = [:]
     private var bubbles: [TranscriptBubble] = []
-    /// Segments some prompt came from, marked in the thread.
+    /// Segments the suggestion came from, marked in the thread.
     private var usedSegments: Set<String> = []
-    private var grouping = false
-    private var groupingNote = "" { didSet { refreshStatus() } }
+
+    private(set) var isWriting = false
+    /// Typing while the model writes keeps the typing and drops what comes back.
+    private var typedWhileWriting = false
+    private var settingText = false
+    private let editorUndo = UndoManager()
 
     private let listenStatus = NSTextField(labelWithString: "")
-    private let groupStatus = NSTextField(labelWithString: "")
     private let pauseButton = NSButton(title: "", target: nil, action: nil)
-    private let groupButton = NSButton(title: "Find prompts", target: nil, action: nil)
+    private let note = NSTextField(labelWithString: "")
+    private let rewriteButton = NSButton(title: "Rewrite", target: nil, action: nil)
+    private let openButton = NSButton(title: "Open in tab", target: nil, action: nil)
     private let split = NSSplitView()
-    private let emptyPrompts = NSTextField(wrappingLabelWithString: "")
+    private let placeholder = NSTextField(wrappingLabelWithString: "")
     private let timeFormatter = DateFormatter()
     private let dayFormatter = DateFormatter()
     private var positionedDivider = false
 
-    /// Minimum words in new speech before opening the tab asks the model about it.
-    private static let minimumWords = 4
+    /// `suggestionMinutes` in defaults, else five.
+    private var minutes: Double {
+        let set = UserDefaults.standard.double(forKey: "suggestionMinutes")
+        return set > 0 ? set : PromptSuggestion.defaultMinutes
+    }
 
-    init(log: TranscriptLog, store: CandidateStore, listener: Listener?) {
+    init(log: TranscriptLog, store: SuggestionStore, listener: Listener?) {
         self.log = log
         self.store = store
         self.listener = listener
         super.init()
         timeFormatter.dateFormat = "HH:mm"
         dayFormatter.dateFormat = "EEE HH:mm"
-        setUpTables()
+        setUpEditor()
+        setUpThread()
         setUpLayout()
         reloadSegments()
-        refreshUsed()
+        editor.string = store.suggestion.text
+        usedSegments = Set(store.suggestion.segmentIDs)
+        refreshPlaceholder()
         listener?.onSegment = { [weak self] segment in self?.append(segment) }
         listener?.onChange = { [weak self] in self?.listenerChanged() }
         refreshStatus()
     }
 
-    var selectedCandidate: PromptCandidate? {
-        let row = prompts.selectedRow
-        return row >= 0 && row < store.candidates.count ? store.candidates[row] : nil
+    /// A copy: `editor.string` is the text storage's live backing store, so a string taken from it
+    /// changes when the editor does.
+    var suggestionText: String { editor.attributedString().string }
+
+    /// Font, colour and line spacing, the same as the prompt tabs.
+    var textAttributes: [NSAttributedString.Key: Any] = [:] {
+        didSet {
+            editor.font = textAttributes[.font] as? NSFont
+            editor.defaultParagraphStyle = textAttributes[.paragraphStyle] as? NSParagraphStyle
+            editor.typingAttributes = textAttributes
+            if let storage = editor.textStorage, storage.length > 0 {
+                storage.addAttributes(textAttributes, range: NSRange(location: 0, length: storage.length))
+            }
+        }
     }
 
     func focus() {
-        let table = store.candidates.isEmpty ? thread : prompts
-        view.window?.makeFirstResponder(table)
-        if table === prompts, prompts.selectedRow < 0 { prompts.selectRowIndexes([0], byExtendingSelection: false) }
-        if table === thread { scrollThreadToEnd() }
+        view.window?.makeFirstResponder(editor)
     }
 
-    /// Called when the tab comes to the front.
+    /// Called when the tab comes to the front: writes a new suggestion when something was said
+    /// since the last one, unless the current one has been edited.
     func appeared() {
         reloadSegments()
         if !positionedDivider, split.bounds.height > 0 {
             positionedDivider = true
-            split.setPosition((split.bounds.height * 0.45).rounded(), ofDividerAt: 0)
+            split.setPosition((split.bounds.height * 0.4).rounded(), ofDividerAt: 0)
         }
-        findPromptsInNewSpeech()
         scrollThreadToEnd()
+        let newest = segments.last?.end ?? .distantPast
+        let edited = store.suggestion.edited && !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if newest > store.suggestion.through ?? .distantPast {
+            if edited {
+                note.stringValue = "You said more since this was written. ⌘R rewrites it from the last \(minutesLabel) (⌘Z undoes)."
+            } else {
+                write(from: PromptSuggestion.recent(segments, minutes: minutes))
+            }
+        }
     }
 
-    /// Removes a prompt once it's been opened in a tab or sent.
-    func consume(_ candidate: PromptCandidate) {
-        let row = prompts.selectedRow
-        store.remove(candidate.id)
-        reloadPrompts(select: row)
+    /// After the suggestion is sent or opened in a tab: empty until something new is said.
+    func clearSuggestion() {
+        replaceText(with: "")
+        store.suggestion = Suggestion(through: store.suggestion.through)
+        usedSegments = []
+        thread.reloadData()
+        note.stringValue = ""
+    }
+
+    @objc func openInTab() {
+        let text = suggestionText
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        onOpen?(text)
+        clearSuggestion()
     }
 
     /// Self-test only: puts made-up speech in the log as if it had just been heard.
@@ -95,61 +132,108 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         reloadSegments()
     }
 
-    var candidates: [PromptCandidate] { store.candidates }
-    var isFindingPrompts: Bool { grouping }
+    // MARK: - Writing the suggestion
 
-    // MARK: - Finding prompts
-
-    /// Everything said since the last pass, unless there's too little of it to bother.
-    func findPromptsInNewSpeech() {
-        let since = store.processedThrough ?? Date().addingTimeInterval(-3600)
-        let fresh = segments.filter { $0.start >= since }
-        guard fresh.reduce(0, { $0 + $1.wordCount }) >= Self.minimumWords else { return }
-        find(in: fresh, advancing: true)
-    }
-
-    /// The thread messages selected, or else everything new.
-    @objc func findPrompts() {
+    /// ⌘R: from the selected thread messages, or else the last few minutes. Replaces edits;
+    /// ⌘Z brings them back.
+    @objc func rewrite() {
         let rows = thread.selectedRowIndexes.filter { $0 < bubbles.count }
-        if rows.isEmpty {
-            let since = store.processedThrough ?? Date().addingTimeInterval(-3600)
-            let fresh = segments.filter { $0.start >= since }
-            if fresh.isEmpty {
-                groupingNote = "Nothing new said since the last pass. Select messages in the thread to look at them again."
-            } else {
-                find(in: fresh, advancing: true)
-            }
-        } else {
-            find(in: rows.flatMap { bubbles[$0].segments }, advancing: false)
-        }
+        let chosen = rows.isEmpty ? PromptSuggestion.recent(segments, minutes: minutes)
+            : PromptSuggestion.limit(rows.flatMap { bubbles[$0].segments })
+        write(from: chosen)
     }
 
-    private func find(in chosen: [TranscriptSegment], advancing: Bool) {
-        guard !grouping else { return }
-        let sent = PromptGrouping.limit(chosen)
+    private func write(from chosen: [TranscriptSegment]) {
+        guard !isWriting else { return }
+        guard let first = chosen.first, let last = chosen.last else {
+            note.stringValue = "Nothing heard yet."
+            return
+        }
+        isWriting = true
+        typedWhileWriting = false
+        rewriteButton.isEnabled = false
+        let range = "\(label(for: first.start))–\(timeFormatter.string(from: last.end))"
+        note.stringValue = "Writing a prompt from \(range)…"
+        refreshPlaceholder()
         let echo = self.echo
-        grouping = true
-        let skipped = chosen.count - sent.count
-        groupingNote = "Finding prompts in \(sent.count) segment\(sent.count == 1 ? "" : "s")…"
-            + (skipped > 0 ? " (skipped \(skipped) older)" : "")
-        groupButton.isEnabled = false
         Task {
             defer {
-                self.grouping = false
-                self.groupButton.isEnabled = true
+                self.isWriting = false
+                self.rewriteButton.isEnabled = true
+                self.refreshPlaceholder()
             }
             do {
-                let found = try await Grouper.candidates(from: sent, echo: echo)
-                if advancing, let last = chosen.last { store.processedThrough = last.end }
-                store.add(found)
-                reloadPrompts(select: found.isEmpty ? nil : 0)
-                refreshUsed()
-                groupingNote = found.isEmpty ? "No prompts in what was said." : "Found \(found.count) prompt\(found.count == 1 ? "" : "s")."
-                if !found.isEmpty, view.window?.firstResponder === thread { view.window?.makeFirstResponder(prompts) }
+                let suggestion = try await Suggester.suggestion(from: chosen, echo: echo)
+                if typedWhileWriting {
+                    store.suggestion.through = suggestion.through
+                    note.stringValue = "Kept what you typed. ⌘R replaces it with a rewrite from \(range)."
+                    return
+                }
+                replaceText(with: suggestion.text)
+                store.suggestion = suggestion
+                usedSegments = Set(suggestion.segmentIDs)
+                thread.reloadData()
+                note.stringValue = suggestion.text.isEmpty
+                    ? "Nothing from \(range) sounded like a prompt."
+                    : "Written from \(range)."
+                if view.window?.firstResponder === editor { editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0)) }
             } catch {
-                groupingNote = "Couldn't find prompts: \(error.localizedDescription)"
+                note.stringValue = "Couldn't write a prompt: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Replaces the whole suggestion as one step ⌘Z can undo.
+    private func replaceText(with text: String) {
+        let full = NSRange(location: 0, length: (editor.string as NSString).length)
+        settingText = true
+        if editor.shouldChangeText(in: full, replacementString: text) {
+            editor.replaceCharacters(in: full, with: text)
+            editor.didChangeText()
+            editorUndo.setActionName("Rewrite")
+        }
+        settingText = false
+        if let storage = editor.textStorage, storage.length > 0 {
+            storage.addAttributes(textAttributes, range: NSRange(location: 0, length: storage.length))
+        }
+        refreshPlaceholder()
+    }
+
+    private func refreshPlaceholder() {
+        placeholder.isHidden = !editor.string.isEmpty
+        placeholder.stringValue = isWriting ? "Writing…"
+            : "Say what you want done. Opening this tab writes a prompt from the last \(minutesLabel), and you can edit it here."
+    }
+
+    private var minutesLabel: String {
+        minutes == 1 ? "minute" : "\(minutes.formatted()) minutes"
+    }
+
+    // MARK: - Editor delegate
+
+    func undoManager(for view: NSTextView) -> UndoManager? { editorUndo }
+
+    func textDidChange(_ notification: Notification) {
+        refreshPlaceholder()
+        guard !settingText else { return }
+        store.suggestion.text = suggestionText
+        store.suggestion.edited = true
+        if isWriting { typedWhileWriting = true }
+    }
+
+    /// Esc hides the window; Tab goes to the thread, since a prompt rarely needs a tab character.
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):
+            onCancel?()
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            view.window?.makeFirstResponder(thread)
+            if thread.selectedRow < 0, !bubbles.isEmpty { thread.selectRowIndexes([bubbles.count - 1], byExtendingSelection: false) }
+            scrollThreadToEnd()
+        default:
+            return false
+        }
+        return true
     }
 
     // MARK: - Thread
@@ -216,27 +300,6 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         if !text.isEmpty { onOpen?(text) }
     }
 
-    // MARK: - Prompts
-
-    private func reloadPrompts(select row: Int?) {
-        prompts.reloadData()
-        emptyPrompts.isHidden = !store.candidates.isEmpty
-        if let row, !store.candidates.isEmpty {
-            prompts.selectRowIndexes([min(row, store.candidates.count - 1)], byExtendingSelection: false)
-        }
-    }
-
-    private func refreshUsed() {
-        usedSegments = Set(store.candidates.flatMap(\.segmentIDs))
-        thread.reloadData()
-    }
-
-    private func dismissSelectedPrompt() {
-        guard let candidate = selectedCandidate else { return }
-        consume(candidate)
-        refreshUsed()
-    }
-
     // MARK: - Status
 
     @objc private func togglePause() {
@@ -256,7 +319,6 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         }
         listenStatus.stringValue = listening
         listenStatus.textColor = { if case .listening = listener?.state { return .systemRed } else { return .secondaryLabelColor } }()
-        groupStatus.stringValue = groupingNote
         let paused = listener?.isPaused ?? true
         pauseButton.title = paused ? "Listen" : "Pause"
         pauseButton.image = NSImage(systemSymbolName: paused ? "mic" : "mic.slash", accessibilityDescription: nil)
@@ -265,44 +327,52 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
 
     // MARK: - Setup
 
-    private func setUpTables() {
-        for table in [prompts, thread] {
-            table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("column")))
-            table.headerView = nil
-            table.style = .plain
-            table.usesAutomaticRowHeights = true
-            table.dataSource = self
-            table.delegate = self
-            table.target = self
-            table.onCancel = { [weak self] in self?.onCancel?() }
-        }
-        prompts.doubleAction = #selector(doubleClicked(_:))
-        thread.doubleAction = #selector(doubleClicked(_:))
-        prompts.onReturn = { [weak self] in
-            guard let self, let candidate = self.selectedCandidate else { return }
-            self.onOpen?(candidate.prompt)
-            self.consume(candidate)
-            self.refreshUsed()
-        }
-        prompts.onDelete = { [weak self] in self?.dismissSelectedPrompt() }
-        thread.allowsMultipleSelection = true
-        thread.onReturn = { [weak self] in self?.openSelectedMessages() }
-        thread.onDelete = {}
-        prompts.nextKeyView = thread
-        thread.nextKeyView = prompts
+    private func setUpEditor() {
+        editor.minSize = .zero
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainerInset = NSSize(width: 18, height: 12)
+        editor.isRichText = false
+        editor.importsGraphics = false
+        editor.allowsUndo = true
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isContinuousSpellCheckingEnabled = true
+        editor.drawsBackground = true
+        editor.backgroundColor = .textBackgroundColor
+        editor.delegate = self
     }
 
-    @objc private func doubleClicked(_ sender: NSTableView) {
-        (sender === prompts ? prompts.onReturn : thread.onReturn)?()
+    private func setUpThread() {
+        thread.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("column")))
+        thread.headerView = nil
+        thread.style = .plain
+        thread.usesAutomaticRowHeights = true
+        thread.dataSource = self
+        thread.delegate = self
+        thread.target = self
+        thread.allowsMultipleSelection = true
+        thread.doubleAction = #selector(doubleClicked)
+        thread.onReturn = { [weak self] in self?.openSelectedMessages() }
+        thread.onDelete = {}
+        thread.onCancel = { [weak self] in self?.onCancel?() }
+        thread.nextKeyView = editor
     }
+
+    @objc private func doubleClicked() { openSelectedMessages() }
 
     private func setUpLayout() {
         listenStatus.font = .systemFont(ofSize: 11, weight: .medium)
-        groupStatus.font = .systemFont(ofSize: 11)
-        groupStatus.textColor = .secondaryLabelColor
-        groupStatus.lineBreakMode = .byTruncatingTail
-        groupStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for button in [pauseButton, groupButton] {
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.lineBreakMode = .byTruncatingTail
+        note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for button in [pauseButton, rewriteButton, openButton] {
             button.bezelStyle = .accessoryBarAction
             button.controlSize = .small
             button.font = .systemFont(ofSize: 11)
@@ -310,35 +380,54 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
             button.target = self
         }
         pauseButton.action = #selector(togglePause)
-        groupButton.action = #selector(findPrompts)
-        groupButton.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-        groupButton.toolTip = "Find prompts in the selected messages, or in everything new (⌘R)"
+        rewriteButton.action = #selector(rewrite)
+        rewriteButton.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        rewriteButton.toolTip = "Rewrite from the selected messages, or the last few minutes (⌘R)"
+        openButton.action = #selector(openInTab)
+        openButton.image = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: nil)
+        openButton.toolTip = "Open the suggestion in a new tab (⌘O)"
 
-        let header = NSStackView(views: [listenStatus, groupStatus, NSView(), groupButton, pauseButton])
+        let header = NSStackView(views: [listenStatus, note, NSView(), rewriteButton, openButton, pauseButton])
         header.orientation = .horizontal
         header.spacing = 10
         header.edgeInsets = NSEdgeInsets(top: 6, left: 14, bottom: 6, right: 10)
 
-        emptyPrompts.stringValue = "Prompts you say out loud show up here when you open this tab. Select messages below and press ⌘R to look at them again."
-        emptyPrompts.font = .systemFont(ofSize: 12)
-        emptyPrompts.textColor = .tertiaryLabelColor
-        emptyPrompts.alignment = .center
-        emptyPrompts.isHidden = !store.candidates.isEmpty
+        let editorScroll = NSScrollView()
+        editorScroll.documentView = editor
+        editorScroll.hasVerticalScroller = true
+        editorScroll.drawsBackground = true
+        editorScroll.backgroundColor = .textBackgroundColor
 
-        let promptsScroll = scroll(for: prompts)
-        promptsScroll.addSubview(emptyPrompts)
-        emptyPrompts.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.font = .systemFont(ofSize: 12)
+        placeholder.textColor = .tertiaryLabelColor
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        let top = NSView()
+        for sub in [editorScroll, placeholder] as [NSView] {
+            sub.translatesAutoresizingMaskIntoConstraints = false
+            top.addSubview(sub)
+        }
         NSLayoutConstraint.activate([
-            emptyPrompts.centerYAnchor.constraint(equalTo: promptsScroll.centerYAnchor),
-            emptyPrompts.leadingAnchor.constraint(equalTo: promptsScroll.leadingAnchor, constant: 40),
-            emptyPrompts.trailingAnchor.constraint(equalTo: promptsScroll.trailingAnchor, constant: -40),
+            editorScroll.topAnchor.constraint(equalTo: top.topAnchor),
+            editorScroll.bottomAnchor.constraint(equalTo: top.bottomAnchor),
+            editorScroll.leadingAnchor.constraint(equalTo: top.leadingAnchor),
+            editorScroll.trailingAnchor.constraint(equalTo: top.trailingAnchor),
+            placeholder.topAnchor.constraint(equalTo: top.topAnchor, constant: 13),
+            placeholder.leadingAnchor.constraint(equalTo: top.leadingAnchor, constant: 24),
+            placeholder.trailingAnchor.constraint(lessThanOrEqualTo: top.trailingAnchor, constant: -24),
         ])
+
+        let threadScroll = NSScrollView()
+        threadScroll.documentView = thread
+        threadScroll.hasVerticalScroller = true
+        threadScroll.drawsBackground = true
+        threadScroll.backgroundColor = .controlBackgroundColor
+        thread.backgroundColor = .controlBackgroundColor
 
         split.isVertical = false
         split.dividerStyle = .thin
         split.delegate = self
-        split.addArrangedSubview(promptsScroll)
-        split.addArrangedSubview(scroll(for: thread))
+        split.addArrangedSubview(top)
+        split.addArrangedSubview(threadScroll)
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -360,16 +449,6 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         ])
     }
 
-    private func scroll(for table: NSTableView) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .textBackgroundColor
-        table.backgroundColor = .textBackgroundColor
-        return scroll
-    }
-
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         60
     }
@@ -378,25 +457,13 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         splitView.bounds.height - 80
     }
 
-    // MARK: - Tables
+    // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView === prompts { return store.candidates.count }
-        return bubbles.count + (listener?.volatile.isEmpty == false ? 1 : 0)
+        bubbles.count + (listener?.volatile.isEmpty == false ? 1 : 0)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === prompts {
-            let id = NSUserInterfaceItemIdentifier("prompt")
-            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? PromptCell ?? PromptCell(identifier: id)
-            let candidate = store.candidates[row]
-            cell.title.stringValue = candidate.title
-            cell.time.stringValue = label(for: candidate.spoken)
-            cell.body.stringValue = candidate.prompt
-            cell.quote.stringValue = "“\(candidate.quote)”"
-            cell.toolTip = candidate.prompt
-            return cell
-        }
         let id = NSUserInterfaceItemIdentifier("message")
         let cell = tableView.makeView(withIdentifier: id, owner: nil) as? MessageCell ?? MessageCell(identifier: id)
         if row < bubbles.count {
@@ -417,7 +484,7 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        tableView === prompts || row < bubbles.count
+        row < bubbles.count
     }
 
     /// Segments that are the speakers are faded; ones that are partly the speakers less so.
@@ -437,54 +504,8 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     }
 }
 
-/// A prompt the model found: title and time, the rewrite, and the words it came from.
-final class PromptCell: NSTableCellView {
-    let title = NSTextField(labelWithString: "")
-    let time = NSTextField(labelWithString: "")
-    let body = NSTextField(wrappingLabelWithString: "")
-    let quote = NSTextField(wrappingLabelWithString: "")
-
-    init(identifier: NSUserInterfaceItemIdentifier) {
-        super.init(frame: .zero)
-        self.identifier = identifier
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.lineBreakMode = .byTruncatingTail
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        time.font = .systemFont(ofSize: 10)
-        time.textColor = .secondaryLabelColor
-        body.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
-        body.maximumNumberOfLines = 8
-        body.cell?.truncatesLastVisibleLine = true
-        quote.font = .systemFont(ofSize: 10.5)
-        quote.textColor = .tertiaryLabelColor
-        quote.maximumNumberOfLines = 2
-        quote.cell?.truncatesLastVisibleLine = true
-        for sub in [title, time, body, quote] {
-            sub.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(sub)
-        }
-        for label in [body, quote] { label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
-        NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            time.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
-            time.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
-            time.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
-            body.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            quote.topAnchor.constraint(equalTo: body.bottomAnchor, constant: 4),
-            quote.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            quote.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            quote.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-}
-
 /// A message in the thread: its time on the left, the words on the right. A bar marks messages
-/// a prompt came from.
+/// the suggestion came from.
 final class MessageCell: NSTableCellView {
     static let font = NSFont.systemFont(ofSize: 13)
 

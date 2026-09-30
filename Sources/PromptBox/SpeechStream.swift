@@ -28,7 +28,7 @@ final class SpeechStream: @unchecked Sendable {
             try await request.downloadAndInstall()
         }
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-            throw PromptGrouping.Failure(message: "No audio format for \(locale.identifier)")
+            throw PromptSuggestion.Failure(message: "No audio format for \(locale.identifier)")
         }
         return try await SpeechStream(transcriber: transcriber, format: format, source: source)
     }

@@ -103,7 +103,7 @@ enum SelfTest {
     }
 
     /// Fills the transcript with made-up speech, opens the transcript tab (which asks claude for
-    /// the prompts in it), writes what came back to `transcript.txt`, and shows the window.
+    /// a prompt from it), writes the suggestion to `transcript.txt`, and shows the window.
     private static func runTranscript(_ window: PromptWindow, into dir: URL) {
         let lines = [
             (0, "okay so the sidebar um overlaps the editor when the window is really narrow"),
@@ -126,17 +126,26 @@ enum SelfTest {
         window.transcript.seed(fake)
         window.panel.orderFrontRegardless()
         window.showTranscript()
+        window.panel.makeKeyAndOrderFront(nil)
         print("WINDOW \(window.panel.windowNumber)")
         fflush(stdout)
         func finish() {
-            guard !window.transcript.isFindingPrompts else {
+            guard !window.transcript.isWriting else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { finish() } }
                 return
             }
-            let report = window.transcript.candidates.map { "# \($0.title)\n\($0.prompt)\n  from: \($0.quote)" }
-                .joined(separator: "\n\n")
+            let report = window.transcript.suggestionText
             try? report.write(to: dir.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
-            print(report.isEmpty ? "NO PROMPTS" : report)
+            print("SUGGESTION:\n" + (report.isEmpty ? "(empty)" : report))
+            // ⌘⇧↩: copy and file in history. The clipboard gets its old text back afterwards.
+            let pasteboard = NSPasteboard.general
+            let saved = pasteboard.string(forType: .string)
+            window.send(paste: false)
+            let copied = pasteboard.string(forType: .string) == report
+            let filed = window.history.entries.first.flatMap { window.history.text(for: $0.id)?.string } == report
+            print("COPY: clipboard \(copied ? "ok" : "wrong"), history \(filed ? "ok" : "wrong"), suggestion now \(window.transcript.suggestionText.isEmpty ? "empty" : "not empty")")
+            pasteboard.clearContents()
+            if let saved { pasteboard.setString(saved, forType: .string) }
             fflush(stdout)
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
         }

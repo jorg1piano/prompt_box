@@ -91,13 +91,13 @@ final class Listener {
 
     private func begin(_ run: Int) async throws {
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
-            throw PromptGrouping.Failure(message: "Microphone access is off. Turn it on in System Settings › Privacy & Security › Microphone.")
+            throw PromptSuggestion.Failure(message: "Microphone access is off. Turn it on in System Settings › Privacy & Security › Microphone.")
         }
         let wanted = UserDefaults.standard.string(forKey: Self.localeKey).map(Locale.init(identifier:)) ?? Locale.current
         var match = await SpeechTranscriber.supportedLocale(equivalentTo: wanted)
         if match == nil { match = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en-US")) }
         guard let locale = match else {
-            throw PromptGrouping.Failure(message: "On-device transcription doesn't support \(wanted.identifier)")
+            throw PromptSuggestion.Failure(message: "On-device transcription doesn't support \(wanted.identifier)")
         }
         let stream = try await SpeechStream.make(locale: locale)
         guard run == generation else {
@@ -109,7 +109,7 @@ final class Listener {
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { throw PromptGrouping.Failure(message: "No microphone") }
+        guard format.sampleRate > 0 else { throw PromptSuggestion.Failure(message: "No microphone") }
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in stream.feed(buffer) }
         engine.prepare()
         try engine.start()

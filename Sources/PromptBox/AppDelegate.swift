@@ -139,7 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabs.addItem(.separator())
         let transcript = tabs.addItem(withTitle: "Transcript", action: #selector(toggleTranscript), keyEquivalent: "A")
         transcript.target = self
-        tabs.addItem(withTitle: "Find Prompts in Transcript", action: #selector(findPrompts), keyEquivalent: "r").target = self
+        tabs.addItem(withTitle: "Rewrite Suggested Prompt", action: #selector(rewriteSuggestion), keyEquivalent: "r").target = self
+        tabs.addItem(withTitle: "Open Suggested Prompt in Tab", action: #selector(openSuggestion), keyEquivalent: "o").target = self
         tabs.addItem(withTitle: "Pause or Resume Listening", action: #selector(togglePause), keyEquivalent: "L").target = self
         tabs.addItem(.separator())
         tabs.addItem(withTitle: "Find Tab…", action: #selector(findTab), keyEquivalent: "k").target = self
@@ -178,7 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func reopenTab() { window.reopenClosedTab() }
     @objc private func findTab() { window.toggleSwitcher() }
     @objc private func toggleTranscript() { window.toggleTranscript() }
-    @objc private func findPrompts() { window.findPromptsInTranscript() }
+    @objc private func rewriteSuggestion() { window.rewriteSuggestion() }
+    @objc private func openSuggestion() { window.openSuggestionInTab() }
     @objc private func togglePause() {
         guard let listener = window.listener else { return }
         listener.setPaused(!listener.isPaused)
