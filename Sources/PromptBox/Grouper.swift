@@ -7,8 +7,9 @@ enum Grouper {
     /// `haiku` unless the `groupingModel` default says otherwise.
     static var model: String { UserDefaults.standard.string(forKey: "groupingModel") ?? "haiku" }
 
-    static func candidates(from segments: [TranscriptSegment]) async throws -> [PromptCandidate] {
-        let output = try await runClaude(input: PromptGrouping.input(for: segments))
+    /// `echo` marks the segments that were the speakers, from `EchoMatch.scores`.
+    static func candidates(from segments: [TranscriptSegment], echo: [String: Double]) async throws -> [PromptCandidate] {
+        let output = try await runClaude(input: PromptGrouping.input(for: segments, echo: echo))
         return try PromptGrouping.candidates(fromCLIOutput: output, segments: segments)
     }
 

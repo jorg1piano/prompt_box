@@ -4,7 +4,8 @@ import PromptBoxCore
 import Speech
 
 /// Keeps the microphone open from launch and writes every finished segment to the transcript
-/// log. It restarts itself when the input device changes or the Mac wakes.
+/// log. It also transcribes what the Mac plays, so segments that are really a video or a call
+/// can be told apart from you. It restarts itself when a device changes or the Mac wakes.
 @MainActor
 final class Listener {
     enum State: Equatable {
@@ -16,6 +17,8 @@ final class Listener {
 
     let log: TranscriptLog
     private(set) var state: State = .paused { didSet { onChange?() } }
+    /// Why the speakers aren't being recorded, when they aren't.
+    private(set) var speakerProblem: String? { didSet { onChange?() } }
     /// Words the transcriber hasn't settled on yet.
     private(set) var volatile = "" { didSet { onChange?() } }
 
@@ -24,6 +27,8 @@ final class Listener {
 
     private let engine = AVAudioEngine()
     private var stream: SpeechStream?
+    private var speakerStream: SpeechStream?
+    private var speakers: SpeakerCapture?
     private var generation = 0
     private var observers: [NSObjectProtocol] = []
 
@@ -43,6 +48,9 @@ final class Listener {
                                                                            queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.restart() }
         })
+        SpeakerCapture.observeOutputChanges { [weak self] in
+            MainActor.assumeIsolated { self?.restart() }
+        }
     }
 
     func start() {
@@ -107,6 +115,26 @@ final class Listener {
         try engine.start()
         self.stream = stream
         state = .listening(locale: locale.identifier(.bcp47))
+        await startSpeakers(locale: locale, run: run)
+    }
+
+    /// A failure here leaves the microphone running; segments just don't get marked.
+    private func startSpeakers(locale: Locale, run: Int) async {
+        do {
+            let stream = try await SpeechStream.make(locale: locale, source: .speakers)
+            guard run == generation else {
+                await stream.finish()
+                return
+            }
+            stream.onFinal = { [weak self] segment in self?.record(segment) }
+            let capture = SpeakerCapture()
+            try capture.start { buffer in stream.feed(buffer) }
+            speakerStream = stream
+            speakers = capture
+            speakerProblem = nil
+        } catch {
+            speakerProblem = error.localizedDescription
+        }
     }
 
     private func record(_ segment: TranscriptSegment) {
@@ -121,10 +149,13 @@ final class Listener {
     /// Stops the microphone; what was already said still gets finished and saved.
     func stop() {
         stopEngine()
-        if let stream {
-            self.stream = nil
+        speakers?.stop()
+        speakers = nil
+        for stream in [stream, speakerStream].compactMap({ $0 }) {
             Task { await stream.finish() }
         }
+        stream = nil
+        speakerStream = nil
         volatile = ""
     }
 

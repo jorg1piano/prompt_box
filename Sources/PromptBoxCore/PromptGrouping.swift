@@ -33,7 +33,13 @@ public enum PromptGrouping {
 
     The transcript is numbered segments with the time each was said. Most of it is not a \
     prompt: talking to people, phone calls, thinking out loud about unrelated things, and \
-    other people's voices. Leave all of that out. A prompt is a request, instruction, bug \
+    other people's voices. Leave all of that out.
+
+    Segments marked (speakers) are audio the computer was playing, such as a video or the other \
+    side of a call, that the microphone picked up. They are never the developer: don't make \
+    prompts from them, though they can explain what the developer is reacting to. Segments \
+    marked (partly speakers) mix the two; use only the words that aren't from the audio. \
+    A prompt is a request, instruction, bug \
     report or idea about code or a task the developer would hand to an agent.
 
     Group segments that are about the same task into one prompt, even when other talk sits \
@@ -68,11 +74,14 @@ public enum PromptGrouping {
         return kept.reversed()
     }
 
-    /// `[1] 10:02:13 okay so the sidebar overlaps…`, one segment per line.
-    public static func input(for segments: [TranscriptSegment], calendar: Calendar = .current) -> String {
+    /// `[1] 10:02:13 okay so the sidebar overlaps…`, one segment per line, with `(speakers)` or
+    /// `(partly speakers)` after the time when `echo` says the speakers played those words.
+    public static func input(for segments: [TranscriptSegment], echo: [String: Double] = [:], calendar: Calendar = .current) -> String {
         segments.enumerated().map { i, segment in
             let t = calendar.dateComponents([.hour, .minute, .second], from: segment.start)
-            return String(format: "[%d] %02d:%02d:%02d ", i + 1, t.hour!, t.minute!, t.second!) + segment.text
+            let score = echo[segment.id] ?? 0
+            let mark = score >= EchoMatch.echo ? "(speakers) " : score >= EchoMatch.partial ? "(partly speakers) " : ""
+            return String(format: "[%d] %02d:%02d:%02d ", i + 1, t.hour!, t.minute!, t.second!) + mark + segment.text
         }.joined(separator: "\n")
     }
 

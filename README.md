@@ -60,9 +60,23 @@ the thread marks those messages with a bar.
   text in a tab, or `⌘R` to ask for the prompts in just those.
 - One pass reads at most the newest 12,000 words.
 
+### Videos and calls
+
+The microphone also picks up whatever the Mac plays. So PromptBox records the Mac's own output
+too (every app but PromptBox, through a Core Audio process tap) and transcribes it with a
+second transcriber. A microphone segment whose word pairs the speakers played within 3 seconds
+of it is marked: half or more matching means it was the speakers, a quarter or more means it
+mixes your words with theirs (`Sources/PromptBoxCore/EchoMatch.swift`). The thread fades those
+words and shows a speaker icon, and the prompt pass sees them labelled `(speakers)` or
+`(partly speakers)` and leaves them out. Nothing is removed from the transcript. With
+headphones on, the microphone doesn't hear the video, so there's nothing to mark.
+
+macOS asks once for System Audio Recording. Without it the speakers record as silence and
+nothing gets marked. The two transcribers together use about 9% of one core.
+
 Transcripts are kept forever as one JSON line per segment in
-`~/Library/Application Support/PromptBox/transcripts/<date>.jsonl`; the prompts waiting in the
-tab are in `prompts.json` next to them.
+`~/Library/Application Support/PromptBox/transcripts/<date>.jsonl`, with `"source"` either
+`mic` or `speakers`; the prompts waiting in the tab are in `prompts.json` next to them.
 
 To keep it listening, add PromptBox to System Settings › General › Login Items.
 `promptbox://pause` and `promptbox://listen` switch the microphone from Hammerspoon.

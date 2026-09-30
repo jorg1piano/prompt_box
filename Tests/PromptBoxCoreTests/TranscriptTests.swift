@@ -93,3 +93,51 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(CandidateStore(url: url).candidates.map(\.title), ["old"])
     }
 }
+
+final class EchoMatchTests: XCTestCase {
+    let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+
+    private func segment(_ offset: TimeInterval, _ text: String, _ source: TranscriptSegment.Source = .mic) -> TranscriptSegment {
+        TranscriptSegment(start: t0.addingTimeInterval(offset), end: t0.addingTimeInterval(offset + 3), text: text, source: source)
+    }
+
+    func testVideoPickedUpByTheMicIsAnEcho() {
+        let mic = segment(0.8, "In today's video we look at the best keyboards of 2026.")
+        let speakers = segment(0, "in today's video, we look at the best keyboards of twenty twenty six", .speakers)
+        let scores = EchoMatch.scores(mic: [mic], speakers: [speakers])
+        XCTAssertGreaterThanOrEqual(scores[mic.id]!, EchoMatch.echo)
+    }
+
+    func testTalkingOverAVideoIsNotAnEcho() {
+        let mic = segment(1, "fix the sidebar in the settings screen")
+        let speakers = segment(0, "the best keyboard in the world is the one you use", .speakers)
+        XCTAssertLessThan(EchoMatch.scores(mic: [mic], speakers: [speakers])[mic.id]!, EchoMatch.partial)
+    }
+
+    func testMixedSegmentIsPartial() {
+        let score = EchoMatch.score("wow the best mechanical keyboards ever okay fix the sidebar overlap now",
+                                    against: "the best mechanical keyboards ever made")
+        XCTAssertGreaterThanOrEqual(score, EchoMatch.partial)
+        XCTAssertLessThan(score, EchoMatch.echo)
+    }
+
+    func testSpeakerAudioAtAnotherTimeDoesNotCount() {
+        let mic = segment(100, "the best keyboards of 2026")
+        let speakers = segment(0, "the best keyboards of 2026", .speakers)
+        XCTAssertNil(EchoMatch.scores(mic: [mic], speakers: [speakers])[mic.id])
+    }
+
+    func testInputMarksSpeakers() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let a = segment(0, "fix it"), b = segment(5, "subscribe"), c = segment(9, "mixed")
+        let input = PromptGrouping.input(for: [a, b, c], echo: [b.id: 0.9, c.id: 0.3], calendar: calendar)
+        XCTAssertEqual(input, "[1] 14:13:20 fix it\n[2] 14:13:25 (speakers) subscribe\n[3] 14:13:29 (partly speakers) mixed")
+    }
+
+    func testOldLinesDecodeAsMic() throws {
+        let line = #"{"end":"2026-09-30T01:20:39.744Z","id":"x","start":"2026-09-30T01:20:36.504Z","text":"hi"}"#
+        let segment = try JSONDecoder.transcript.decode(TranscriptSegment.self, from: Data(line.utf8))
+        XCTAssertEqual(segment.source, .mic)
+    }
+}

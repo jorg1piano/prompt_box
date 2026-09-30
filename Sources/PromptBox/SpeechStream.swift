@@ -12,15 +12,17 @@ final class SpeechStream: @unchecked Sendable {
     private let input: AsyncStream<AnalyzerInput>.Continuation
     private var converter: AVAudioConverter?
     private var results: Task<Void, Never>?
+    private let source: TranscriptSegment.Source
     /// Wall-clock time of the first sample. The analyzer times results from there.
-    private let started = Date()
+    private var started: Date?
+    private let lock = NSLock()
 
     /// Both are called on the main actor.
     var onFinal: ((TranscriptSegment) -> Void)?
     var onVolatile: ((String) -> Void)?
 
     /// Downloads the language model first if it isn't installed.
-    static func make(locale: Locale) async throws -> SpeechStream {
+    static func make(locale: Locale, source: TranscriptSegment.Source = .mic) async throws -> SpeechStream {
         let transcriber = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await request.downloadAndInstall()
@@ -28,11 +30,12 @@ final class SpeechStream: @unchecked Sendable {
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw PromptGrouping.Failure(message: "No audio format for \(locale.identifier)")
         }
-        return try await SpeechStream(transcriber: transcriber, format: format)
+        return try await SpeechStream(transcriber: transcriber, format: format, source: source)
     }
 
-    private init(transcriber: SpeechTranscriber, format: AVAudioFormat) async throws {
+    private init(transcriber: SpeechTranscriber, format: AVAudioFormat, source: TranscriptSegment.Source) async throws {
         self.transcriber = transcriber
+        self.source = source
         self.format = format
         analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .processLifetime))
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
@@ -53,8 +56,9 @@ final class SpeechStream: @unchecked Sendable {
     private func handle(_ result: SpeechTranscriber.Result) {
         let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
         let isFinal = result.isFinal
+        let started = lock.withLock { self.started } ?? Date()
         let segment = TranscriptSegment(start: started.addingTimeInterval(result.range.start.seconds),
-                                        end: started.addingTimeInterval(result.range.end.seconds), text: text)
+                                        end: started.addingTimeInterval(result.range.end.seconds), text: text, source: source)
         Task { @MainActor [weak self] in
             guard let self else { return }
             if isFinal {
@@ -66,11 +70,23 @@ final class SpeechStream: @unchecked Sendable {
         }
     }
 
-    /// Called on the audio thread.
+    /// Called on the audio thread. The buffer is copied or converted, so it may be one that's
+    /// only valid for the length of the call.
     func feed(_ buffer: AVAudioPCMBuffer) {
         guard buffer.frameLength > 0 else { return }
+        lock.withLock { if started == nil { started = Date() } }
         if buffer.format == format {
-            input.yield(AnalyzerInput(buffer: buffer))
+            if let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength) {
+                copy.frameLength = buffer.frameLength
+                let from = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
+                let to = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+                for (source, target) in zip(from, to) {
+                    if let data = source.mData, let destination = target.mData {
+                        destination.copyMemory(from: data, byteCount: Int(min(source.mDataByteSize, target.mDataByteSize)))
+                    }
+                }
+                input.yield(AnalyzerInput(buffer: copy))
+            }
             return
         }
         if converter?.inputFormat != buffer.format {

@@ -18,7 +18,12 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     private let log: TranscriptLog
     private let store: CandidateStore
     private let listener: Listener?
+    /// What the microphone heard; the thread shows these.
     private var segments: [TranscriptSegment] = []
+    /// What the Mac played, only used to find microphone segments that are really the speakers.
+    private var played: [TranscriptSegment] = []
+    /// Microphone segment id to the share of its words the speakers were playing.
+    private var echo: [String: Double] = [:]
     private var bubbles: [TranscriptBubble] = []
     /// Segments some prompt came from, marked in the thread.
     private var usedSegments: Set<String> = []
@@ -122,6 +127,7 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
     private func find(in chosen: [TranscriptSegment], advancing: Bool) {
         guard !grouping else { return }
         let sent = PromptGrouping.limit(chosen)
+        let echo = self.echo
         grouping = true
         let skipped = chosen.count - sent.count
         groupingNote = "Finding prompts in \(sent.count) segment\(sent.count == 1 ? "" : "s")…"
@@ -133,7 +139,7 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
                 self.groupButton.isEnabled = true
             }
             do {
-                let found = try await Grouper.candidates(from: sent)
+                let found = try await Grouper.candidates(from: sent, echo: echo)
                 if advancing, let last = chosen.last { store.processedThrough = last.end }
                 store.add(found)
                 reloadPrompts(select: found.isEmpty ? nil : 0)
@@ -150,17 +156,30 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
 
     private func reloadSegments() {
         let since = Calendar.current.startOfDay(for: Date().addingTimeInterval(-86_400))
-        segments = log.segments(since: since)
+        let all = log.segments(since: since)
+        segments = all.filter { $0.source == .mic }
+        played = all.filter { $0.source == .speakers }
+        echo = EchoMatch.scores(mic: segments, speakers: played)
         bubbles = TranscriptThread.bubbles(segments)
         thread.reloadData()
     }
 
+    /// Speaker audio can finish after the microphone segment it echoes, so both kinds rescore
+    /// the recent segments.
     private func append(_ segment: TranscriptSegment) {
         let atEnd = isThreadAtEnd
-        segments.append(segment)
+        let recent = segment.start.addingTimeInterval(-120)
+        if segment.source == .speakers {
+            played.append(segment)
+        } else {
+            segments.append(segment)
+        }
+        let rescored = EchoMatch.scores(mic: segments.filter { $0.end >= recent }, speakers: played.filter { $0.end >= recent })
+        echo.merge(rescored) { _, new in new }
+        guard segment.source == .mic || !rescored.isEmpty else { return }
         let before = bubbles.count
         bubbles = TranscriptThread.bubbles(segments)
-        if bubbles.count == before, before > 0 {
+        if segment.source == .mic, bubbles.count == before, before > 0 {
             thread.reloadData(forRowIndexes: [before - 1], columnIndexes: [0])
             thread.noteHeightOfRows(withIndexesChanged: [before - 1])
         } else {
@@ -230,7 +249,8 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         switch listener?.state {
         case nil: listening = "Not listening"
         case .starting: listening = "Starting the microphone…"
-        case .listening(let locale): listening = "● Listening (\(locale))"
+        case .listening(let locale):
+            listening = "● Listening (\(locale))" + (listener?.speakerProblem.map { " · \($0)" } ?? "")
         case .paused: listening = "Paused"
         case .failed(let message): listening = message
         }
@@ -382,20 +402,34 @@ final class TranscriptPanel: NSObject, NSTableViewDataSource, NSTableViewDelegat
         if row < bubbles.count {
             let bubble = bubbles[row]
             cell.time.stringValue = label(for: bubble.start)
-            cell.body.stringValue = bubble.text
-            cell.body.textColor = .labelColor
+            cell.body.attributedStringValue = text(of: bubble)
             cell.used = bubble.segments.contains { usedSegments.contains($0.id) }
+            cell.fromSpeakers = bubble.segments.contains { (echo[$0.id] ?? 0) >= EchoMatch.partial }
         } else {
             cell.time.stringValue = "now"
-            cell.body.stringValue = listener?.volatile ?? ""
-            cell.body.textColor = .secondaryLabelColor
+            cell.body.attributedStringValue = NSAttributedString(string: listener?.volatile ?? "", attributes: [
+                .font: MessageCell.font, .foregroundColor: NSColor.secondaryLabelColor,
+            ])
             cell.used = false
+            cell.fromSpeakers = false
         }
         return cell
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         tableView === prompts || row < bubbles.count
+    }
+
+    /// Segments that are the speakers are faded; ones that are partly the speakers less so.
+    private func text(of bubble: TranscriptBubble) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for (i, segment) in bubble.segments.enumerated() {
+            let score = echo[segment.id] ?? 0
+            let color: NSColor = score >= EchoMatch.echo ? .tertiaryLabelColor : score >= EchoMatch.partial ? .secondaryLabelColor : .labelColor
+            result.append(NSAttributedString(string: (i == 0 ? "" : " ") + segment.text,
+                                             attributes: [.font: MessageCell.font, .foregroundColor: color]))
+        }
+        return result
     }
 
     private func label(for date: Date) -> String {
@@ -452,11 +486,21 @@ final class PromptCell: NSTableCellView {
 /// A message in the thread: its time on the left, the words on the right. A bar marks messages
 /// a prompt came from.
 final class MessageCell: NSTableCellView {
+    static let font = NSFont.systemFont(ofSize: 13)
+
     let time = NSTextField(labelWithString: "")
     let body = NSTextField(wrappingLabelWithString: "")
     private let bar = NSView()
+    private let speaker = NSImageView(image: NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "From the speakers")!)
 
     var used = false { didSet { bar.isHidden = !used } }
+    /// Some of it was a video or call the microphone picked up.
+    var fromSpeakers = false {
+        didSet {
+            speaker.isHidden = !fromSpeakers
+            toolTip = fromSpeakers ? "The faded words were also playing from the speakers." : nil
+        }
+    }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -464,13 +508,16 @@ final class MessageCell: NSTableCellView {
         time.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         time.textColor = .secondaryLabelColor
         time.alignment = .right
-        body.font = .systemFont(ofSize: 13)
+        body.font = Self.font
         body.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        speaker.symbolConfiguration = .init(pointSize: 9, weight: .regular)
+        speaker.contentTintColor = .tertiaryLabelColor
+        speaker.isHidden = true
         bar.wantsLayer = true
         bar.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         bar.layer?.cornerRadius = 1.5
         bar.isHidden = true
-        for sub in [time, body, bar] {
+        for sub in [time, body, bar, speaker] {
             sub.translatesAutoresizingMaskIntoConstraints = false
             addSubview(sub)
         }
@@ -478,6 +525,8 @@ final class MessageCell: NSTableCellView {
             time.firstBaselineAnchor.constraint(equalTo: body.firstBaselineAnchor),
             time.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             time.widthAnchor.constraint(equalToConstant: 58),
+            speaker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            speaker.centerYAnchor.constraint(equalTo: time.centerYAnchor),
             bar.leadingAnchor.constraint(equalTo: time.trailingAnchor, constant: 6),
             bar.widthAnchor.constraint(equalToConstant: 3),
             bar.topAnchor.constraint(equalTo: body.topAnchor),

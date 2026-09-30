@@ -31,6 +31,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>PromptBox transcribes what you say, on this Mac, so you can turn it into prompts.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>PromptBox transcribes what your Mac plays, so it can tell videos and calls apart from what you say.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>PromptBox transcribes what you say, on this Mac, so you can turn it into prompts.</string>
 	<key>LSUIElement</key>

@@ -112,12 +112,18 @@ enum SelfTest {
             (95, "and in the fuzzy search add a test for typos like sidbar and promtp"),
             (99, "oh and the sidebar thing, keep the deleted list open when it collapses"),
             (140, "in today's video we're going to look at the best mechanical keyboards of 2026"),
+            (160, "add a setting to change the keyboard shortcut for the transcript tab"),
         ]
         let start = Date().addingTimeInterval(-600)
-        window.transcript.seed(lines.map { offset, text in
+        var fake = lines.map { offset, text in
             TranscriptSegment(start: start.addingTimeInterval(TimeInterval(offset)),
                               end: start.addingTimeInterval(TimeInterval(offset) + 3), text: text)
-        })
+        }
+        // The keyboard video, as the speakers played it a moment earlier.
+        fake.append(TranscriptSegment(start: start.addingTimeInterval(139.5), end: start.addingTimeInterval(142.5),
+                                      text: "In today's video we're going to look at the best mechanical keyboards of 2026.",
+                                      source: .speakers))
+        window.transcript.seed(fake)
         window.panel.orderFrontRegardless()
         window.showTranscript()
         print("WINDOW \(window.panel.windowNumber)")

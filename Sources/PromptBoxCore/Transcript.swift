@@ -2,16 +2,35 @@ import Foundation
 
 /// One stretch of speech the transcriber finished, with wall-clock times.
 public struct TranscriptSegment: Codable, Equatable, Identifiable {
+    /// What the microphone heard, or what the Mac itself played (videos, calls), which is only
+    /// used to tell which microphone segments were the speakers rather than you.
+    public enum Source: String, Codable {
+        case mic
+        case speakers
+    }
+
     public let id: String
     public let start: Date
     public let end: Date
     public let text: String
+    public let source: Source
 
-    public init(id: String = UUID().uuidString, start: Date, end: Date, text: String) {
+    public init(id: String = UUID().uuidString, start: Date, end: Date, text: String, source: Source = .mic) {
         self.id = id
         self.start = start
         self.end = end
         self.text = text
+        self.source = source
+    }
+
+    /// Lines written before speakers were recorded have no source; they're all microphone.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        start = try container.decode(Date.self, forKey: .start)
+        end = try container.decode(Date.self, forKey: .end)
+        text = try container.decode(String.self, forKey: .text)
+        source = try container.decodeIfPresent(Source.self, forKey: .source) ?? .mic
     }
 
     public var wordCount: Int { text.split { $0.isWhitespace }.count }
